@@ -4301,6 +4301,7 @@ dependencies = [
 name = "tinymail"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs 5.0.1",
  "imap",
  "keyring",

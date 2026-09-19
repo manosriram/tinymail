@@ -138,7 +138,10 @@ async function showMessage(folder, uid) {
     const attachmentsHtml = msg.attachments
       .map(
         (a) =>
-          `<li>${escapeHtml(a.filename)} (${a.size} bytes) <button data-filename="${escapeHtml(a.filename)}">Save</button></li>`
+          `<li class="attachment-item" data-filename="${escapeHtml(a.filename)}" data-content-type="${escapeHtml(a.content_type)}" title="${escapeHtml(a.filename)} (${a.size} bytes)">
+            <span class="attachment-preview">${isImageType(a.content_type) ? "" : attachmentIcon(a.filename)}</span>
+            <button data-filename="${escapeHtml(a.filename)}">Save</button>
+          </li>`
       )
       .join("");
     messageDetail.innerHTML = `
@@ -149,10 +152,23 @@ async function showMessage(folder, uid) {
       <div class="message-toolbar"><button id="reply-btn">Reply</button></div>
       <hr/>
       <div class="body">${formatBody(msg.body)}</div>
-      ${msg.attachments.length ? `<h3>Attachments</h3><ul>${attachmentsHtml}</ul>` : ""}
+      ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
     `;
     document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
     markMessageRead(folder, uid);
+    messageDetail.querySelectorAll("li.attachment-item").forEach((li) => {
+      const filename = li.dataset.filename;
+      const contentType = li.dataset.contentType;
+      if (!isImageType(contentType)) return;
+      invoke("get_attachment_data", { folder, uid, filename })
+        .then((base64) => {
+          const img = document.createElement("img");
+          img.className = "attachment-thumb";
+          img.src = `data:${contentType};base64,${base64}`;
+          li.querySelector(".attachment-preview").replaceChildren(img);
+        })
+        .catch((err) => console.error(err));
+    });
     messageDetail.querySelectorAll("button[data-filename]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const filename = btn.dataset.filename;
@@ -269,11 +285,34 @@ document.getElementById("attachment-picker").addEventListener("click", async () 
   const paths = Array.isArray(selected) ? selected : [selected];
   for (const p of paths) {
     attachmentPaths.push(p);
+    const filename = p.split("/").pop();
     const li = document.createElement("li");
-    li.textContent = p.split("/").pop();
+    li.className = "attachment-item";
+    li.title = filename;
+    const preview = document.createElement("span");
+    preview.className = "attachment-preview";
+    preview.textContent = attachmentIcon();
+    li.append(preview);
     attachmentListEl.appendChild(li);
+
+    if (isImageType(guessImageType(filename))) {
+      invoke("read_file_base64", { path: p })
+        .then((base64) => {
+          const img = document.createElement("img");
+          img.className = "attachment-thumb";
+          img.src = `data:${guessImageType(filename)};base64,${base64}`;
+          preview.replaceChildren(img);
+        })
+        .catch((err) => console.error(err));
+    }
   }
 });
+
+function guessImageType(filename) {
+  const ext = filename.split(".").pop().toLowerCase();
+  const types = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml" };
+  return types[ext] || "";
+}
 
 async function submitCompose(shouldSend) {
   const form = new FormData(composeForm);
@@ -301,6 +340,14 @@ composeForm.addEventListener("submit", (e) => {
 document.getElementById("save-draft-btn").addEventListener("click", () => {
   submitCompose(false);
 });
+
+function isImageType(contentType) {
+  return /^image\//.test(contentType || "");
+}
+
+function attachmentIcon() {
+  return "\u{1F4CE}"; // 📎
+}
 
 function escapeHtml(str) {
   const div = document.createElement("div");

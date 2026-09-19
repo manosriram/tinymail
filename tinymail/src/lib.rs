@@ -3,14 +3,21 @@ mod mail;
 
 use account::Account;
 use mail::{MessageDetail, MessageSummary, SessionCache};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::State;
+
+// Keychain lookups can trigger a macOS "keychain access" prompt; caching the
+// credentials in memory after the first successful load means each command
+// invocation doesn't hit the keychain again for the life of the app.
+static CREDENTIALS_CACHE: Mutex<Option<(Account, String)>> = Mutex::new(None);
 
 #[tauri::command]
 async fn save_account(account: Account, password: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || account::save(&account, &password))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    *CREDENTIALS_CACHE.lock().unwrap() = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -21,8 +28,12 @@ async fn get_account() -> Result<Option<Account>, String> {
 }
 
 fn current_account() -> Result<(Account, String), String> {
+    if let Some(cached) = CREDENTIALS_CACHE.lock().unwrap().clone() {
+        return Ok(cached);
+    }
     let account = account::load()?.ok_or("no account configured")?;
     let password = account::password(&account.username)?;
+    *CREDENTIALS_CACHE.lock().unwrap() = Some((account.clone(), password.clone()));
     Ok((account, password))
 }
 
@@ -77,6 +88,32 @@ async fn save_attachment(
 }
 
 #[tauri::command]
+async fn get_attachment_data(
+    folder: String,
+    uid: u32,
+    filename: String,
+    cache: State<'_, Arc<SessionCache>>,
+) -> Result<String, String> {
+    let cache = cache.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (account, password) = current_account()?;
+        mail::get_attachment_data(&cache, &account, &password, &folder, uid, &filename)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn read_file_base64(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn send_email(
     to: String,
     subject: String,
@@ -124,6 +161,8 @@ pub fn run() {
             get_message,
             mark_read,
             save_attachment,
+            get_attachment_data,
+            read_file_base64,
             send_email,
             save_draft
         ])

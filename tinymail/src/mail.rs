@@ -1,4 +1,5 @@
 use crate::account::Account;
+use base64::Engine;
 use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
@@ -77,6 +78,7 @@ pub struct MessageSummary {
 pub struct AttachmentInfo {
     pub filename: String,
     pub size: usize,
+    pub content_type: String,
 }
 
 #[derive(Serialize)]
@@ -172,9 +174,12 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
 
     let attachments = parsed
         .attachments()
-        .map(|a| AttachmentInfo {
-            filename: a.attachment_name().unwrap_or("attachment").to_string(),
-            size: a.contents().len(),
+        .map(|a| {
+            let filename = a.attachment_name().unwrap_or("attachment").to_string();
+            let content_type = mime_guess::from_path(&filename)
+                .first_or_octet_stream()
+                .to_string();
+            AttachmentInfo { filename, size: a.contents().len(), content_type }
         })
         .collect();
 
@@ -231,6 +236,33 @@ pub fn save_attachment(
             .ok_or("attachment not found")?;
 
         std::fs::write(&dest_path, attachment.contents()).map_err(|e| e.to_string())
+    })
+}
+
+pub fn get_attachment_data(
+    cache: &SessionCache,
+    account: &Account,
+    password: &str,
+    folder: &str,
+    uid: u32,
+    filename: &str,
+) -> Result<String, String> {
+    let mailbox_name = resolve_folder(account, folder);
+    with_connected(cache, account, password, |session| {
+        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+        let fetches = session
+            .uid_fetch(uid.to_string(), "BODY[]")
+            .map_err(|e| e.to_string())?;
+        let fetch = fetches.first().ok_or("message not found")?;
+        let raw = fetch.body().ok_or("empty message body")?;
+        let parsed = MessageParser::default().parse(raw).ok_or("failed to parse message")?;
+
+        let attachment = parsed
+            .attachments()
+            .find(|a| a.attachment_name() == Some(filename))
+            .ok_or("attachment not found")?;
+
+        Ok(base64::engine::general_purpose::STANDARD.encode(attachment.contents()))
     })
 }
 

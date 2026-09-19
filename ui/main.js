@@ -152,6 +152,9 @@ async function showMessage(folder, uid) {
   try {
     const msg = await invoke("get_message", { folder, uid });
     currentMessage = { folder, uid, from: msg.from, subject: msg.subject, body: msg.body };
+    const bodyHtml = msg.body_html
+      ? `<iframe id="message-body-frame" sandbox="allow-same-origin" title="Message body"></iframe>`
+      : `<div class="body">${formatBody(msg.body)}</div>`;
     const attachmentsHtml = msg.attachments
       .map(
         (a) =>
@@ -168,11 +171,12 @@ async function showMessage(folder, uid) {
       <p><strong>Date:</strong> ${escapeHtml(msg.date)}</p>
       <div class="message-toolbar"><button id="reply-btn">Reply</button></div>
       <hr/>
-      <div class="body">${formatBody(msg.body)}</div>
+      ${bodyHtml}
       ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
     `;
     document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
     markMessageRead(folder, uid);
+    if (msg.body_html) renderHtmlBody(document.getElementById("message-body-frame"), msg.body_html);
     messageDetail.querySelectorAll("li.attachment-item").forEach((li) => {
       const filename = li.dataset.filename;
       const contentType = li.dataset.contentType;
@@ -370,6 +374,37 @@ function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str ?? "";
   return div.innerHTML;
+}
+
+// HTML mail bodies come pre-sanitized (scripts/handlers stripped server-side)
+// but still carry the sender's own CSS, so they're rendered in a sandboxed
+// iframe to keep that styling from leaking into the app UI. No allow-scripts
+// means embedded/inline JS can never execute regardless of sanitization.
+// allow-same-origin only lets this parent frame read the iframe's DOM to size
+// it and intercept link clicks — safe to combine with no-scripts.
+function renderHtmlBody(iframe, html) {
+  const wrapped = `<!doctype html><html><head><base target="_blank"><meta charset="utf-8">
+    <style>body{margin:0;font-family:inherit;color:inherit;word-wrap:break-word;} img{max-width:100%;}</style>
+    </head><body>${html}</body></html>`;
+  iframe.addEventListener("load", () => {
+    const doc = iframe.contentDocument;
+    if (!doc) return;
+    const resize = () => {
+      iframe.style.height = `${doc.documentElement.scrollHeight}px`;
+    };
+    resize();
+    doc.querySelectorAll("img").forEach((img) => img.addEventListener("load", resize));
+    doc.querySelectorAll("a[href]").forEach((a) => {
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        const href = a.getAttribute("href") || "";
+        if (/^(https?:|mailto:)/i.test(href)) {
+          window.__TAURI__.opener.openUrl(href).catch((err) => console.error(err));
+        }
+      });
+    });
+  });
+  iframe.srcdoc = wrapped;
 }
 
 // Renders plain-text/markdown-ish email bodies as safe HTML: escape first, then

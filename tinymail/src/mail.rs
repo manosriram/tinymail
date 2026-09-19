@@ -88,6 +88,8 @@ pub struct MessageDetail {
     pub subject: String,
     pub date: String,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_html: Option<String>,
     pub attachments: Vec<AttachmentInfo>,
 }
 
@@ -145,27 +147,17 @@ pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, fo
     })
 }
 
-/// mail_parser's own HTML-to-text conversion drops `href` attributes entirely,
-/// keeping only the visible label — so "button" links (an <a> wrapping a
-/// styled table/image with no visible URL) become plain, unclickable text.
-/// Rewrite anchors as markdown links first so the URL survives, then let
-/// mail_parser strip the remaining tags as usual; the frontend already
-/// linkifies `[label](url)` markdown in message bodies.
-fn html_to_text_with_links(html: &str) -> String {
-    static ANCHOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let anchor = ANCHOR.get_or_init(|| {
-        regex::Regex::new(r#"(?is)<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#).unwrap()
-    });
-
-    let rewritten = anchor.replace_all(html, |caps: &regex::Captures| {
-        let url = &caps[1];
-        let label = mail_parser::decoders::html::html_to_text(&caps[2]);
-        let label = label.trim().replace('\n', " ");
-        let label = if label.is_empty() { url.to_string() } else { label };
-        format!("[{}]({})", label, url)
-    });
-
-    mail_parser::decoders::html::html_to_text(&rewritten)
+/// Sanitizes an HTML mail body for direct rendering (in a sandboxed iframe on
+/// the frontend): strips scripts, inline event handlers, and anything else
+/// that isn't a safe content tag, while preserving real markup — links,
+/// images, tables, formatting — instead of flattening it all to plain text.
+fn sanitize_html(html: &str) -> String {
+    ammonia::Builder::default()
+        .add_tags(["style"])
+        .rm_clean_content_tags(["style"])
+        .add_generic_attributes(["style", "class", "align", "valign", "bgcolor", "width", "height"])
+        .clean(html)
+        .to_string()
 }
 
 fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
@@ -190,10 +182,8 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         .date()
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
-    let body = match parsed.body_html(0) {
-        Some(html) => html_to_text_with_links(&html),
-        None => parsed.body_text(0).map(|b| b.to_string()).unwrap_or_default(),
-    };
+    let body_html = parsed.body_html(0).map(|html| sanitize_html(&html));
+    let body = parsed.body_text(0).map(|b| b.to_string()).unwrap_or_default();
 
     let attachments = parsed
         .attachments()
@@ -206,7 +196,7 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         })
         .collect();
 
-    Ok(MessageDetail { from, to, subject, date, body, attachments })
+    Ok(MessageDetail { from, to, subject, date, body, body_html, attachments })
 }
 
 pub fn get_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<MessageDetail, String> {
@@ -379,24 +369,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn button_link_survives_as_markdown_link() {
+    fn button_link_survives_sanitization() {
         let html = r#"
             <p>Hi there,</p>
             <a href="https://example.com/confirm?token=abc">
                 <table><tr><td style="background:#00f">Confirm email</td></tr></table>
             </a>
         "#;
-        let text = html_to_text_with_links(html);
-        assert!(
-            text.contains("[Confirm email](https://example.com/confirm?token=abc)"),
-            "expected link markdown in: {text}"
-        );
+        let clean = sanitize_html(html);
+        assert!(clean.contains(r#"href="https://example.com/confirm?token=abc""#));
+        assert!(clean.contains("Confirm email"));
     }
 
     #[test]
-    fn plain_html_without_links_still_converts() {
-        let text = html_to_text_with_links("<p>Hello <b>world</b></p>");
-        assert!(text.contains("Hello"));
-        assert!(text.contains("world"));
+    fn image_src_survives_sanitization() {
+        let clean = sanitize_html(r#"<img src="https://example.com/pixel.png" alt="pic">"#);
+        assert!(clean.contains(r#"src="https://example.com/pixel.png""#));
+    }
+
+    #[test]
+    fn script_and_event_handlers_are_stripped() {
+        let clean = sanitize_html(
+            r#"<p onclick="alert(1)">hi</p><script>alert(1)</script><a href="javascript:alert(1)">bad</a>"#,
+        );
+        assert!(!clean.contains("onclick"));
+        assert!(!clean.contains("<script"));
+        assert!(!clean.contains("javascript:"));
     }
 }

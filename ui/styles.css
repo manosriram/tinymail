@@ -113,6 +113,7 @@ button, input, textarea { font-family: inherit; color: inherit; }
 .message-detail hr { border: none; border-top: 1px solid var(--border); margin: 0.75rem 0; }
 .message-detail .body { white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; line-height: 1.5; }
 .message-detail .body a { color: var(--accent); }
+#message-body-frame { width: 100%; border: none; display: block; }
 .message-toolbar { margin: 0.5rem 0 0.25rem; }
 .message-toolbar button {
   padding: 0.35rem 0.8rem; font-size: 0.82rem; cursor: pointer;

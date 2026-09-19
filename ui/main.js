@@ -384,7 +384,16 @@ function escapeHtml(str) {
 // it and intercept link clicks — safe to combine with no-scripts.
 function renderHtmlBody(iframe, html) {
   const wrapped = `<!doctype html><html><head><base target="_blank"><meta charset="utf-8">
-    <style>body{margin:0;font-family:inherit;color:inherit;word-wrap:break-word;} img{max-width:100%;}</style>
+    <style>
+      html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; }
+      body { margin: 0; font-family: inherit; color: #fff; background: #1c1c1f; word-wrap: break-word; }
+      /* Marketing emails often size their outer wrapper for a fixed preview pane
+         (height/max-height + overflow:hidden); left alone that clips the real
+         content to a sliver of the message. Force any direct child of body to
+         size to its content instead. */
+      body > * { height: auto !important; max-height: none !important; overflow: visible !important; }
+      img { max-width: 100%; }
+    </style>
     </head><body>${html}</body></html>`;
   iframe.addEventListener("load", () => {
     const doc = iframe.contentDocument;
@@ -393,6 +402,7 @@ function renderHtmlBody(iframe, html) {
       iframe.style.height = `${doc.documentElement.scrollHeight}px`;
     };
     resize();
+    new ResizeObserver(resize).observe(doc.documentElement);
     doc.querySelectorAll("img").forEach((img) => img.addEventListener("load", resize));
     doc.querySelectorAll("a[href]").forEach((a) => {
       a.addEventListener("click", (e) => {

@@ -30,9 +30,11 @@ native-tls = "0.2"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls", "builder"] }
 mail-parser = "0.9"
 mime_guess = "2"
+ammonia = "4"
 base64 = "0.22"
-keyring = { version = "3", features = ["apple-native"] }
 dirs = "5"
+aes-gcm = "0.10"
+rand = "0.8"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

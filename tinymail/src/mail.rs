@@ -145,6 +145,29 @@ pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, fo
     })
 }
 
+/// mail_parser's own HTML-to-text conversion drops `href` attributes entirely,
+/// keeping only the visible label — so "button" links (an <a> wrapping a
+/// styled table/image with no visible URL) become plain, unclickable text.
+/// Rewrite anchors as markdown links first so the URL survives, then let
+/// mail_parser strip the remaining tags as usual; the frontend already
+/// linkifies `[label](url)` markdown in message bodies.
+fn html_to_text_with_links(html: &str) -> String {
+    static ANCHOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let anchor = ANCHOR.get_or_init(|| {
+        regex::Regex::new(r#"(?is)<a\s+[^>]*href\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>"#).unwrap()
+    });
+
+    let rewritten = anchor.replace_all(html, |caps: &regex::Captures| {
+        let url = &caps[1];
+        let label = mail_parser::decoders::html::html_to_text(&caps[2]);
+        let label = label.trim().replace('\n', " ");
+        let label = if label.is_empty() { url.to_string() } else { label };
+        format!("[{}]({})", label, url)
+    });
+
+    mail_parser::decoders::html::html_to_text(&rewritten)
+}
+
 fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
     let parsed = MessageParser::default()
         .parse(raw)
@@ -167,10 +190,10 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         .date()
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
-    let body = parsed
-        .body_text(0)
-        .map(|b| b.to_string())
-        .unwrap_or_default();
+    let body = match parsed.body_html(0) {
+        Some(html) => html_to_text_with_links(&html),
+        None => parsed.body_text(0).map(|b| b.to_string()).unwrap_or_default(),
+    };
 
     let attachments = parsed
         .attachments()
@@ -349,4 +372,31 @@ pub fn save_draft(
     with_connected(cache, account, password, |session| {
         session.append(&account.drafts_folder, &raw).map_err(|e| e.to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn button_link_survives_as_markdown_link() {
+        let html = r#"
+            <p>Hi there,</p>
+            <a href="https://example.com/confirm?token=abc">
+                <table><tr><td style="background:#00f">Confirm email</td></tr></table>
+            </a>
+        "#;
+        let text = html_to_text_with_links(html);
+        assert!(
+            text.contains("[Confirm email](https://example.com/confirm?token=abc)"),
+            "expected link markdown in: {text}"
+        );
+    }
+
+    #[test]
+    fn plain_html_without_links_still_converts() {
+        let text = html_to_text_with_links("<p>Hello <b>world</b></p>");
+        assert!(text.contains("Hello"));
+        assert!(text.contains("world"));
+    }
 }

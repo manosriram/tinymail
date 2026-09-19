@@ -6,17 +6,20 @@ use mail::{MessageDetail, MessageSummary, SessionCache};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
-// Keychain lookups can trigger a macOS "keychain access" prompt; caching the
-// credentials in memory after the first successful load means each command
-// invocation doesn't hit the keychain again for the life of the app.
+// The account password is encrypted at rest with a local key file (see
+// account.rs) instead of the OS keychain or a master password. The decrypted
+// password is cached here, in memory, after the first command that needs it
+// so we don't hit disk + decrypt on every single call.
 static CREDENTIALS_CACHE: Mutex<Option<(Account, String)>> = Mutex::new(None);
 
 #[tauri::command]
 async fn save_account(account: Account, password: String) -> Result<(), String> {
+    let account_for_cache = account.clone();
+    let password_for_cache = password.clone();
     tauri::async_runtime::spawn_blocking(move || account::save(&account, &password))
         .await
         .map_err(|e| e.to_string())??;
-    *CREDENTIALS_CACHE.lock().unwrap() = None;
+    *CREDENTIALS_CACHE.lock().unwrap() = Some((account_for_cache, password_for_cache));
     Ok(())
 }
 
@@ -27,12 +30,18 @@ async fn get_account() -> Result<Option<Account>, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn is_expired() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(account::is_expired)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 fn current_account() -> Result<(Account, String), String> {
     if let Some(cached) = CREDENTIALS_CACHE.lock().unwrap().clone() {
         return Ok(cached);
     }
-    let account = account::load()?.ok_or("no account configured")?;
-    let password = account::password(&account.username)?;
+    let (account, password) = account::credentials()?;
     *CREDENTIALS_CACHE.lock().unwrap() = Some((account.clone(), password.clone()));
     Ok((account, password))
 }
@@ -157,6 +166,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_account,
             get_account,
+            is_expired,
             list_messages,
             get_message,
             mark_read,

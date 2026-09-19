@@ -31,6 +31,7 @@ body {
 button, input, textarea { font-family: inherit; color: inherit; }
 .hidden { display: none !important; }
 .error { color: var(--danger); font-size: 0.85rem; }
+.hint { color: var(--text-muted); font-size: 0.78rem; margin: -0.4rem 0 0; }
 .placeholder { color: var(--text-muted); padding: 1rem; }
 
 /* Setup screen */

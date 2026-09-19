@@ -31,10 +31,27 @@ async function showApp() {
 async function init() {
   try {
     const account = await invoke("get_account");
-    if (account) await showApp();
+    if (!account) return;
+    if (await invoke("is_expired")) {
+      prefillSetupForm(account);
+      setupError.textContent = "Your session expired — please re-enter your password.";
+      return;
+    }
+    await showApp();
   } catch (e) {
     console.error(e);
   }
+}
+
+function prefillSetupForm(account) {
+  const form = document.getElementById("account-form");
+  form.elements.username.value = account.username;
+  form.elements.imap_host.value = account.imap_host;
+  form.elements.imap_port.value = account.imap_port;
+  form.elements.smtp_host.value = account.smtp_host;
+  form.elements.smtp_port.value = account.smtp_port;
+  form.elements.sent_folder.value = account.sent_folder;
+  form.elements.drafts_folder.value = account.drafts_folder;
 }
 
 document.getElementById("account-form").addEventListener("submit", async (e) => {

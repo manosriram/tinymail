@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tinymail</title>
+    <script type="module" src="/main.js" defer></script>
+  </head>
+
+  <body>
+    <!-- Account setup -->
+    <main id="setup-view" class="view">
+      <h1>Connect your account</h1>
+      <form id="account-form">
+        <label>Email <input name="username" type="email" required /></label>
+        <label>Password <input name="password" type="password" required /></label>
+        <label>IMAP host <input name="imap_host" required placeholder="imap.example.com" /></label>
+        <label>IMAP port <input name="imap_port" type="number" value="993" required /></label>
+        <label>SMTP host <input name="smtp_host" required placeholder="smtp.example.com" /></label>
+        <label>SMTP port <input name="smtp_port" type="number" value="465" required /></label>
+        <label>Sent folder <input name="sent_folder" value="Sent" /></label>
+        <label>Drafts folder <input name="drafts_folder" value="Drafts" /></label>
+        <button type="submit">Connect</button>
+      </form>
+      <p id="setup-error" class="error"></p>
+    </main>
+
+    <!-- Mail app -->
+    <main id="app-view" class="view hidden">
+      <header class="topbar">
+        <span class="app-title">tinymail</span>
+        <button id="compose-btn">Compose</button>
+      </header>
+      <div class="app-body">
+        <aside class="sidebar">
+          <nav>
+            <button class="folder-btn active" data-folder="INBOX">Inbox <span class="unread-badge hidden" id="inbox-unread-badge"></span></button>
+            <button class="folder-btn" data-folder="SENT">Sent</button>
+            <button class="folder-btn" data-folder="DRAFTS">Drafts</button>
+          </nav>
+        </aside>
+
+        <section class="message-list-panel">
+          <div class="message-list-header">
+            <span id="folder-title">Inbox</span>
+            <button id="refresh-btn" title="Refresh">⟳</button>
+          </div>
+          <div class="message-list" id="message-list"></div>
+        </section>
+
+        <section class="message-detail" id="message-detail">
+          <p class="placeholder">Select a message</p>
+        </section>
+      </div>
+    </main>
+
+    <!-- Compose modal -->
+    <div id="compose-modal" class="modal hidden">
+      <form id="compose-form" class="modal-content">
+        <h2>New message</h2>
+        <label>To <input name="to" type="email" required /></label>
+        <label>Subject <input name="subject" /></label>
+        <label>Body <textarea name="body" rows="10"></textarea></label>
+        <label>Attachments
+          <input id="attachment-picker" type="button" value="Add files..." />
+          <ul id="attachment-list"></ul>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="save-draft-btn">Save draft</button>
+          <button type="submit">Send</button>
+          <button type="button" id="cancel-compose-btn">Cancel</button>
+        </div>
+        <p id="compose-error" class="error"></p>
+      </form>
+    </div>
+  </body>
+</html>

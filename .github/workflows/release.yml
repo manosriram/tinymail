@@ -49,7 +49,29 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build app
+      - name: Build app (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: cd tinymail && npx --prefix .. tauri build --bundles app
+
+      - name: Re-sign and package dmg (macOS)
+        # tauri-bundler's built-in dmg step re-touches the .app after it signs
+        # it, which invalidates the ad-hoc signature's resource seal and makes
+        # macOS report the app as "damaged" on launch. Building the .app only,
+        # re-signing it last, then packaging the dmg ourselves keeps the
+        # signature valid.
+        if: matrix.platform == 'macos-latest'
+        run: |
+          APP=$(find tinymail/target/release/bundle/macos -name "*.app" -maxdepth 1)
+          codesign --force --deep --sign - "$APP"
+          mkdir -p dmg_root
+          cp -R "$APP" dmg_root/
+          ln -s /Applications dmg_root/Applications
+          mkdir -p tinymail/target/release/bundle/dmg
+          hdiutil create -volname "tinymail" -srcfolder dmg_root -ov -format UDZO \
+            "tinymail/target/release/bundle/dmg/tinymail_aarch64.dmg"
+
+      - name: Build app (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
         run: cd tinymail && npx --prefix .. tauri build
 
       - name: Create/update release

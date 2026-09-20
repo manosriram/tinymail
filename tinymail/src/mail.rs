@@ -61,6 +61,8 @@ fn resolve_folder(account: &Account, folder: &str) -> String {
         "INBOX" => "INBOX".to_string(),
         "SENT" => account.sent_folder.clone(),
         "DRAFTS" => account.drafts_folder.clone(),
+        "ARCHIVE" => account.archive_folder.clone(),
+        "TRASH" => account.trash_folder.clone(),
         other => other.to_string(),
     }
 }
@@ -142,9 +144,19 @@ pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, fo
             })
             .collect();
 
-        summaries.reverse();
+        // Sort by each message's actual Date header rather than trusting IMAP
+        // sequence/arrival order: a message COPY'd into a mailbox (unarchive,
+        // restore-from-trash) is appended at the end regardless of when it was
+        // originally sent, so sequence order would show it out of place.
+        summaries.sort_by_key(|m| std::cmp::Reverse(parse_date_timestamp(&m.date)));
         Ok(summaries)
     })
+}
+
+fn parse_date_timestamp(date: &str) -> i64 {
+    mail_parser::DateTime::parse_rfc822(date)
+        .map(|d| d.to_timestamp())
+        .unwrap_or(i64::MIN)
 }
 
 /// Sanitizes an HTML mail body for direct rendering (in a sandboxed iframe on
@@ -219,6 +231,59 @@ pub fn mark_read(cache: &SessionCache, account: &Account, password: &str, folder
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
             .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
+/// Moves a message to `dest_mailbox` via COPY + STORE \Deleted + EXPUNGE
+/// rather than the IMAP MOVE extension (RFC 6851), since not every server
+/// (especially smaller/custom ones) implements it.
+fn move_message(
+    cache: &SessionCache,
+    account: &Account,
+    password: &str,
+    folder: &str,
+    uid: u32,
+    dest_mailbox: &str,
+) -> Result<(), String> {
+    let mailbox_name = resolve_folder(account, folder);
+    with_connected(cache, account, password, |session| {
+        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+        session.uid_copy(uid.to_string(), dest_mailbox).map_err(|e| e.to_string())?;
+        session
+            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .map_err(|e| e.to_string())?;
+        session.expunge().map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
+pub fn delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+    move_message(cache, account, password, folder, uid, &account.trash_folder)
+}
+
+pub fn archive_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+    move_message(cache, account, password, folder, uid, &account.archive_folder)
+}
+
+pub fn unarchive_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+    move_message(cache, account, password, folder, uid, "INBOX")
+}
+
+pub fn restore_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+    move_message(cache, account, password, folder, uid, "INBOX")
+}
+
+/// Permanently removes a message: STORE \Deleted + EXPUNGE, no copy anywhere
+/// first. Unlike `move_message`, this is not recoverable.
+pub fn permanently_delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+    let mailbox_name = resolve_folder(account, folder);
+    with_connected(cache, account, password, |session| {
+        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+        session
+            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .map_err(|e| e.to_string())?;
+        session.expunge().map_err(|e| e.to_string())?;
         Ok(())
     })
 }
@@ -367,6 +432,73 @@ pub fn save_draft(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_account() -> Account {
+        Account {
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            username: "test@example.com".into(),
+            sent_folder: "Sent".into(),
+            drafts_folder: "Drafts".into(),
+            archive_folder: "Archive".into(),
+            trash_folder: "Trash".into(),
+        }
+    }
+
+    #[test]
+    fn resolve_folder_maps_virtual_folders_to_account_settings() {
+        let account = test_account();
+        assert_eq!(resolve_folder(&account, "INBOX"), "INBOX");
+        assert_eq!(resolve_folder(&account, "SENT"), "Sent");
+        assert_eq!(resolve_folder(&account, "DRAFTS"), "Drafts");
+        assert_eq!(resolve_folder(&account, "ARCHIVE"), "Archive");
+        assert_eq!(resolve_folder(&account, "TRASH"), "Trash");
+    }
+
+    #[test]
+    fn resolve_folder_maps_to_custom_account_folder_names() {
+        let mut account = test_account();
+        account.archive_folder = "All Mail".into();
+        account.trash_folder = "Deleted Items".into();
+        assert_eq!(resolve_folder(&account, "ARCHIVE"), "All Mail");
+        assert_eq!(resolve_folder(&account, "TRASH"), "Deleted Items");
+    }
+
+    #[test]
+    fn resolve_folder_passes_through_unknown_names() {
+        let account = test_account();
+        assert_eq!(resolve_folder(&account, "SomeCustomFolder"), "SomeCustomFolder");
+    }
+
+    #[test]
+    fn parse_date_timestamp_orders_chronologically() {
+        let earlier = parse_date_timestamp("Mon, 1 Jan 2024 00:00:00 +0000");
+        let later = parse_date_timestamp("Fri, 1 Aug 2025 00:00:00 +0000");
+        assert!(later > earlier);
+    }
+
+    #[test]
+    fn parse_date_timestamp_falls_back_on_garbage() {
+        assert_eq!(parse_date_timestamp("not a date"), i64::MIN);
+        assert_eq!(parse_date_timestamp(""), i64::MIN);
+    }
+
+    #[test]
+    fn date_sort_ignores_arrival_order() {
+        // A message COPY'd into a mailbox lands at the end regardless of its
+        // original Date header — simulate that with summaries in arrival order
+        // and confirm sorting fixes it back to chronological (newest first).
+        let mut summaries = vec![
+            MessageSummary { uid: 1, from: "a".into(), subject: "old".into(), date: "Mon, 1 Jan 2024 00:00:00 +0000".into(), unread: false },
+            MessageSummary { uid: 2, from: "b".into(), subject: "newest but arrived first".into(), date: "Fri, 1 Aug 2025 00:00:00 +0000".into(), unread: false },
+            MessageSummary { uid: 3, from: "c".into(), subject: "just restored, old date".into(), date: "Tue, 2 Jan 2024 00:00:00 +0000".into(), unread: false },
+        ];
+        summaries.sort_by_key(|m| std::cmp::Reverse(parse_date_timestamp(&m.date)));
+        let subjects: Vec<&str> = summaries.iter().map(|m| m.subject.as_str()).collect();
+        assert_eq!(subjects, vec!["newest but arrived first", "just restored, old date", "old"]);
+    }
 
     #[test]
     fn button_link_survives_sanitization() {

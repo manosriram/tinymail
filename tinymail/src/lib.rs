@@ -80,6 +80,61 @@ async fn mark_read(folder: String, uid: u32, cache: State<'_, Arc<SessionCache>>
 }
 
 #[tauri::command]
+async fn delete_message(folder: String, uid: u32, cache: State<'_, Arc<SessionCache>>) -> Result<(), String> {
+    let cache = cache.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (account, password) = current_account()?;
+        mail::delete_message(&cache, &account, &password, &folder, uid)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn archive_message(folder: String, uid: u32, cache: State<'_, Arc<SessionCache>>) -> Result<(), String> {
+    let cache = cache.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (account, password) = current_account()?;
+        mail::archive_message(&cache, &account, &password, &folder, uid)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn unarchive_message(folder: String, uid: u32, cache: State<'_, Arc<SessionCache>>) -> Result<(), String> {
+    let cache = cache.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (account, password) = current_account()?;
+        mail::unarchive_message(&cache, &account, &password, &folder, uid)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn restore_message(folder: String, uid: u32, cache: State<'_, Arc<SessionCache>>) -> Result<(), String> {
+    let cache = cache.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (account, password) = current_account()?;
+        mail::restore_message(&cache, &account, &password, &folder, uid)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn permanently_delete_message(folder: String, uid: u32, cache: State<'_, Arc<SessionCache>>) -> Result<(), String> {
+    let cache = cache.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (account, password) = current_account()?;
+        mail::permanently_delete_message(&cache, &account, &password, &folder, uid)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn save_attachment(
     folder: String,
     uid: u32,
@@ -170,6 +225,11 @@ pub fn run() {
             list_messages,
             get_message,
             mark_read,
+            delete_message,
+            archive_message,
+            unarchive_message,
+            restore_message,
+            permanently_delete_message,
             save_attachment,
             get_attachment_data,
             read_file_base64,

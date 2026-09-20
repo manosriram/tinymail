@@ -20,6 +20,10 @@ pub struct Account {
     pub sent_folder: String,
     #[serde(default = "default_drafts")]
     pub drafts_folder: String,
+    #[serde(default = "default_archive")]
+    pub archive_folder: String,
+    #[serde(default = "default_trash")]
+    pub trash_folder: String,
 }
 
 fn default_sent() -> String {
@@ -27,6 +31,12 @@ fn default_sent() -> String {
 }
 fn default_drafts() -> String {
     "Drafts".into()
+}
+fn default_archive() -> String {
+    "Archive".into()
+}
+fn default_trash() -> String {
+    "Trash".into()
 }
 
 fn config_path() -> Result<PathBuf, String> {
@@ -212,6 +222,18 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn account_defaults_archive_and_trash_folders_when_missing() {
+        // Configs written before archive/trash support existed won't have
+        // these keys — must not fail to load, must fall back sensibly.
+        let yaml = "imap_host: imap.example.com\nimap_port: 993\nsmtp_host: smtp.example.com\nsmtp_port: 465\nusername: old@example.com\n";
+        let account: Account = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(account.sent_folder, "Sent");
+        assert_eq!(account.drafts_folder, "Drafts");
+        assert_eq!(account.archive_folder, "Archive");
+        assert_eq!(account.trash_folder, "Trash");
+    }
+
+    #[test]
     fn encrypt_decrypt_round_trip() {
         let _guard = TEST_LOCK.lock().unwrap();
         let secret = encrypt_password("hunter2").unwrap();
@@ -232,6 +254,8 @@ mod tests {
             username: "test@example.com".into(),
             sent_folder: "Sent".into(),
             drafts_folder: "Drafts".into(),
+            archive_folder: "Archive".into(),
+            trash_folder: "Trash".into(),
         };
         save(&account, "hunter2").unwrap();
 
@@ -265,6 +289,8 @@ mod tests {
             username: "old@example.com".into(),
             sent_folder: "Sent".into(),
             drafts_folder: "Drafts".into(),
+            archive_folder: "Archive".into(),
+            trash_folder: "Trash".into(),
         };
         let stored = StoredAccount {
             account,

@@ -21,6 +21,8 @@
         <label>SMTP port <input name="smtp_port" type="number" value="465" required /></label>
         <label>Sent folder <input name="sent_folder" value="Sent" /></label>
         <label>Drafts folder <input name="drafts_folder" value="Drafts" /></label>
+        <label>Archive folder <input name="archive_folder" value="Archive" /></label>
+        <label>Trash folder <input name="trash_folder" value="Trash" /></label>
         <button type="submit">Connect</button>
       </form>
       <p id="setup-error" class="error"></p>
@@ -38,6 +40,8 @@
             <button class="folder-btn active" data-folder="INBOX">Inbox <span class="unread-badge hidden" id="inbox-unread-badge"></span></button>
             <button class="folder-btn" data-folder="SENT">Sent</button>
             <button class="folder-btn" data-folder="DRAFTS">Drafts</button>
+            <button class="folder-btn" data-folder="ARCHIVE">Archive</button>
+            <button class="folder-btn" data-folder="TRASH">Trash</button>
           </nav>
         </aside>
 

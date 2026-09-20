@@ -1,12 +1,12 @@
 const { invoke } = window.__TAURI__.core;
-const { open } = window.__TAURI__.dialog;
+const { open, confirm } = window.__TAURI__.dialog;
 
 let currentFolder = "INBOX";
 let currentMessage = null; // { folder, uid, from, subject, body }
 let attachmentPaths = [];
 const folderCache = {}; // folder -> messages[], avoids refetching on every nav click
 
-const FOLDER_TITLES = { INBOX: "Inbox", SENT: "Sent", DRAFTS: "Drafts" };
+const FOLDER_TITLES = { INBOX: "Inbox", SENT: "Sent", DRAFTS: "Drafts", ARCHIVE: "Archive", TRASH: "Trash" };
 
 const setupView = document.getElementById("setup-view");
 const appView = document.getElementById("app-view");
@@ -52,6 +52,8 @@ function prefillSetupForm(account) {
   form.elements.smtp_port.value = account.smtp_port;
   form.elements.sent_folder.value = account.sent_folder;
   form.elements.drafts_folder.value = account.drafts_folder;
+  form.elements.archive_folder.value = account.archive_folder;
+  form.elements.trash_folder.value = account.trash_folder;
 }
 
 document.getElementById("account-form").addEventListener("submit", async (e) => {
@@ -65,6 +67,8 @@ document.getElementById("account-form").addEventListener("submit", async (e) => 
     smtp_port: Number(form.get("smtp_port")),
     sent_folder: form.get("sent_folder") || "Sent",
     drafts_folder: form.get("drafts_folder") || "Drafts",
+    archive_folder: form.get("archive_folder") || "Archive",
+    trash_folder: form.get("trash_folder") || "Trash",
   };
   const password = form.get("password");
   setupError.textContent = "";
@@ -147,6 +151,37 @@ function invalidateFolder(folder) {
   if (currentFolder === folder) loadFolder(folder, { force: true });
 }
 
+async function confirmAndMove(question, command, destFolder) {
+  if (await confirm(question, { title: "tinymail", kind: "warning" })) {
+    moveCurrentMessage(command, destFolder);
+  }
+}
+
+async function moveCurrentMessage(command, destFolder) {
+  if (!currentMessage) return;
+  const { folder, uid } = currentMessage;
+  try {
+    await invoke(command, { folder, uid });
+  } catch (err) {
+    alert(String(err));
+    return;
+  }
+  currentMessage = null;
+  messageDetail.innerHTML = "<p class='placeholder'>Select a message</p>";
+
+  // The message already left `folder` server-side, so just drop it from the
+  // cached list in place instead of paying for a full IMAP refetch — a
+  // network round trip we already know the answer to. `destFolder`'s cache
+  // is still stale (fresh content, wrong position — see list ordering fix),
+  // so that one does need a real refetch, but only lazily, next time it's opened.
+  if (folderCache[folder]) {
+    folderCache[folder] = folderCache[folder].filter((m) => m.uid !== uid);
+    if (currentFolder === folder) renderMessageList(folder, folderCache[folder]);
+    else if (folder === "INBOX") updateUnreadBadge(folderCache[folder]);
+  }
+  delete folderCache[destFolder];
+}
+
 async function showMessage(folder, uid) {
   messageDetail.innerHTML = "<p class='placeholder'>Loading...</p>";
   try {
@@ -169,12 +204,35 @@ async function showMessage(folder, uid) {
       <p><strong>From:</strong> ${escapeHtml(msg.from)}</p>
       <p><strong>To:</strong> ${escapeHtml(msg.to)}</p>
       <p><strong>Date:</strong> ${escapeHtml(msg.date)}</p>
-      <div class="message-toolbar"><button id="reply-btn">Reply</button></div>
+      <div class="message-toolbar">
+        <button id="reply-btn">Reply</button>
+        ${
+          folder === "ARCHIVE"
+            ? `<button id="unarchive-btn">Unarchive</button>`
+            : folder === "TRASH"
+              ? `<button id="restore-btn">Restore</button>`
+              : `<button id="archive-btn">Archive</button>`
+        }
+        ${folder !== "TRASH" ? `<button id="delete-btn">Delete</button>` : `<button id="delete-forever-btn">Delete Forever</button>`}
+      </div>
       <hr/>
       ${bodyHtml}
       ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
     `;
     document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
+    document.getElementById("archive-btn")?.addEventListener("click", () => moveCurrentMessage("archive_message", "ARCHIVE"));
+    document.getElementById("unarchive-btn")?.addEventListener("click", () =>
+      confirmAndMove("Unarchive this message?", "unarchive_message", "INBOX")
+    );
+    document.getElementById("restore-btn")?.addEventListener("click", () =>
+      confirmAndMove("Restore this message to Inbox?", "restore_message", "INBOX")
+    );
+    document.getElementById("delete-forever-btn")?.addEventListener("click", () =>
+      confirmAndMove("Permanently delete this message? This cannot be undone.", "permanently_delete_message")
+    );
+    document.getElementById("delete-btn")?.addEventListener("click", () =>
+      confirmAndMove("Delete this message?", "delete_message", "TRASH")
+    );
     markMessageRead(folder, uid);
     if (msg.body_html) renderHtmlBody(document.getElementById("message-body-frame"), msg.body_html);
     messageDetail.querySelectorAll("li.attachment-item").forEach((li) => {

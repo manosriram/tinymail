@@ -114,12 +114,15 @@ button, input, textarea { font-family: inherit; color: inherit; }
 .message-detail .body { white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; line-height: 1.5; }
 .message-detail .body a { color: var(--accent); }
 #message-body-frame { width: 100%; border: none; display: block; }
-.message-toolbar { margin: 0.5rem 0 0.25rem; }
+.message-toolbar { margin: 0.5rem 0 0.25rem; display: flex; gap: 0.5rem; }
 .message-toolbar button {
   padding: 0.35rem 0.8rem; font-size: 0.82rem; cursor: pointer;
   background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text);
 }
 .message-toolbar button:hover { background: var(--border); }
+.message-toolbar #delete-btn:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+.message-toolbar #delete-forever-btn { color: var(--danger); border-color: var(--danger); }
+.message-toolbar #delete-forever-btn:hover { background: var(--danger); color: #fff; }
 
 /* Compose modal */
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; }

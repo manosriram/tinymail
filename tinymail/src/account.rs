@@ -308,4 +308,81 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn is_expired_true_when_no_stored_password() {
+        // A config left over from a version that didn't store a password at
+        // all (or one that failed to save it) must count as expired, since
+        // there's nothing to decrypt and log back in with.
+        let _guard = TEST_LOCK.lock().unwrap();
+        let path = config_path().unwrap();
+        let backup = fs::read(&path).ok();
+
+        let account = Account {
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            username: "old@example.com".into(),
+            sent_folder: "Sent".into(),
+            drafts_folder: "Drafts".into(),
+            archive_folder: "Archive".into(),
+            trash_folder: "Trash".into(),
+        };
+        let stored = StoredAccount { account, encrypted_password: None, saved_at: now() };
+        write_stored(&path, &stored).unwrap();
+
+        assert!(is_expired().unwrap());
+
+        match backup {
+            Some(bytes) => fs::write(&path, bytes).unwrap(),
+            None => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn credentials_errors_when_no_account_file() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let path = config_path().unwrap();
+        let backup = fs::read(&path).ok();
+        let _ = fs::remove_file(&path);
+
+        assert!(credentials().is_err());
+
+        if let Some(bytes) = backup {
+            fs::write(&path, bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn credentials_errors_when_password_missing() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let path = config_path().unwrap();
+        let backup = fs::read(&path).ok();
+
+        let account = Account {
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            username: "old@example.com".into(),
+            sent_folder: "Sent".into(),
+            drafts_folder: "Drafts".into(),
+            archive_folder: "Archive".into(),
+            trash_folder: "Trash".into(),
+        };
+        let stored = StoredAccount { account, encrypted_password: None, saved_at: now() };
+        write_stored(&path, &stored).unwrap();
+
+        assert!(credentials().is_err());
+
+        match backup {
+            Some(bytes) => fs::write(&path, bytes).unwrap(),
+            None => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }

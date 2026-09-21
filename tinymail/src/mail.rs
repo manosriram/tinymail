@@ -527,4 +527,130 @@ mod tests {
         assert!(!clean.contains("<script"));
         assert!(!clean.contains("javascript:"));
     }
+
+    #[test]
+    fn parse_message_detail_extracts_basic_fields() {
+        let raw = "From: Alice <alice@example.com>\r\n\
+                    To: Bob <bob@example.com>\r\n\
+                    Subject: Hello World\r\n\
+                    Date: Mon, 1 Jan 2024 12:00:00 +0000\r\n\
+                    Content-Type: text/plain; charset=utf-8\r\n\
+                    \r\n\
+                    Hello, this is the body.\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert_eq!(detail.from, "alice@example.com");
+        assert_eq!(detail.to, "bob@example.com");
+        assert_eq!(detail.subject, "Hello World");
+        assert!(detail.date.starts_with("2024-01-01"));
+        assert!(detail.body.contains("Hello, this is the body."));
+        // mail_parser synthesizes an HTML view even for a plain-text body
+        // (wrapping/escaping it), so body_html is Some here too — it's only
+        // ever None when the message has no readable body part at all.
+        assert!(detail.body_html.is_some());
+        assert!(detail.attachments.is_empty());
+    }
+
+    #[test]
+    fn parse_message_detail_falls_back_on_missing_date() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Subject: No Date\r\n\
+                    Content-Type: text/plain\r\n\
+                    \r\n\
+                    Body\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert_eq!(detail.date, "");
+    }
+
+    #[test]
+    fn parse_message_detail_sanitizes_html_body() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Subject: HTML\r\n\
+                    Content-Type: text/html; charset=utf-8\r\n\
+                    \r\n\
+                    <p onclick=\"alert(1)\">hi</p><script>alert(1)</script>\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        let html = detail.body_html.expect("html body should be present");
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("<script"));
+        assert!(html.contains("hi"));
+    }
+
+    #[test]
+    fn parse_message_detail_extracts_attachment_metadata() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Subject: With Attachment\r\n\
+                    MIME-Version: 1.0\r\n\
+                    Content-Type: multipart/mixed; boundary=\"BOUNDARY\"\r\n\
+                    \r\n\
+                    --BOUNDARY\r\n\
+                    Content-Type: text/plain; charset=utf-8\r\n\
+                    \r\n\
+                    Body text here.\r\n\
+                    --BOUNDARY\r\n\
+                    Content-Type: text/plain; name=\"test.txt\"\r\n\
+                    Content-Disposition: attachment; filename=\"test.txt\"\r\n\
+                    Content-Transfer-Encoding: base64\r\n\
+                    \r\n\
+                    aGVsbG8=\r\n\
+                    --BOUNDARY--\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert!(detail.body.contains("Body text here."));
+        assert_eq!(detail.attachments.len(), 1);
+        assert_eq!(detail.attachments[0].filename, "test.txt");
+        assert_eq!(detail.attachments[0].size, "hello".len());
+    }
+
+    #[test]
+    fn build_message_includes_headers_and_body() {
+        let account = test_account();
+        let raw = build_message(&account, "dest@example.com", "Test Subject", "Test body content", &[]).unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.contains("Test Subject"));
+        assert!(raw_str.contains("dest@example.com"));
+        assert!(raw_str.contains(&account.username));
+        assert!(raw_str.contains("Test body content"));
+    }
+
+    #[test]
+    fn build_message_embeds_attachment_filename() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("tinymail_test_attachment_{}.txt", std::process::id()));
+        std::fs::write(&path, b"attachment contents").unwrap();
+
+        let account = test_account();
+        let raw = build_message(
+            &account,
+            "dest@example.com",
+            "Subject",
+            "Body",
+            &[path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+
+        std::fs::remove_file(&path).unwrap();
+
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(raw_str.contains(&filename));
+    }
+
+    #[test]
+    fn build_message_errors_when_attachment_path_missing() {
+        let account = test_account();
+        let result = build_message(
+            &account,
+            "dest@example.com",
+            "Subject",
+            "Body",
+            &["/nonexistent/tinymail-test-path/file.txt".to_string()],
+        );
+        assert!(result.is_err());
+    }
 }

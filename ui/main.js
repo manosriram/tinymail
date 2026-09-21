@@ -1,6 +1,34 @@
 const { invoke } = window.__TAURI__.core;
 const { open, confirm } = window.__TAURI__.dialog;
 
+// Theme toggle: defaults to the OS preference, overridden once the user picks explicitly.
+const THEME_KEY = "tinymail-theme";
+
+function systemPrefersDark() {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function isDarkActive() {
+  const stored = localStorage.getItem(THEME_KEY);
+  return stored ? stored === "dark" : systemPrefersDark();
+}
+
+function applyTheme() {
+  const stored = localStorage.getItem(THEME_KEY);
+  if (stored) document.documentElement.setAttribute("data-theme", stored);
+  else document.documentElement.removeAttribute("data-theme");
+  const icon = isDarkActive() ? "☀️" : "🌙";
+  document.querySelectorAll(".theme-toggle").forEach((btn) => (btn.textContent = icon));
+}
+
+function toggleTheme() {
+  localStorage.setItem(THEME_KEY, isDarkActive() ? "light" : "dark");
+  applyTheme();
+}
+
+document.querySelectorAll(".theme-toggle").forEach((btn) => btn.addEventListener("click", toggleTheme));
+applyTheme();
+
 let currentFolder = "INBOX";
 let currentMessage = null; // { folder, uid, from, subject, body }
 let attachmentPaths = [];

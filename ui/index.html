@@ -11,6 +11,7 @@
   <body>
     <!-- Account setup -->
     <main id="setup-view" class="view">
+      <button type="button" class="theme-toggle" title="Toggle theme">🌙</button>
       <h1>Connect your account</h1>
       <form id="account-form">
         <label>Email <input name="username" type="email" required /></label>
@@ -32,7 +33,10 @@
     <main id="app-view" class="view hidden">
       <header class="topbar">
         <span class="app-title">tinymail</span>
-        <button id="compose-btn">Compose</button>
+        <div class="topbar-actions">
+          <button type="button" class="theme-toggle" title="Toggle theme">🌙</button>
+          <button id="compose-btn">Compose</button>
+        </div>
       </header>
       <div class="app-body">
         <aside class="sidebar">

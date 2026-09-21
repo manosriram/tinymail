@@ -29,8 +29,21 @@ function toggleTheme() {
 document.querySelectorAll(".theme-toggle").forEach((btn) => btn.addEventListener("click", toggleTheme));
 applyTheme();
 
+// Status toast: transient bottom-left feedback for actions that run in the
+// background (send, delete, archive, ...) instead of blocking the UI on them.
+const toastEl = document.getElementById("toast");
+let toastHideTimer = null;
+
+function showToast(text, { autoHideMs } = {}) {
+  clearTimeout(toastHideTimer);
+  toastEl.textContent = text;
+  toastEl.classList.remove("hidden");
+  if (autoHideMs) toastHideTimer = setTimeout(() => toastEl.classList.add("hidden"), autoHideMs);
+}
+
 let currentFolder = "INBOX";
 let currentMessage = null; // { folder, uid, from, subject, body }
+let currentAccountUsername = null; // set once we know which account is active; scopes the persisted message cache
 let attachmentPaths = [];
 const folderCache = {}; // folder -> messages[], avoids refetching on every nav click
 
@@ -48,24 +61,77 @@ const inboxUnreadBadge = document.getElementById("inbox-unread-badge");
 let knownUnreadUids = null; // null until the first INBOX poll establishes a baseline
 const POLL_INTERVAL_MS = 60000;
 
-async function showApp() {
+// Persisted, per-account message-list cache (localStorage survives app
+// restarts, unlike `folderCache`), so a returning user sees their last-known
+// mail instantly instead of a "Loading..." screen while IMAP reconnects.
+// Keyed by account username so switching accounts can never show a stale
+// list from a previous one.
+function cacheKey(username, folder) {
+  return `tinymail-cache:${username}:${folder}`;
+}
+
+function persistFolderCache(folder) {
+  if (!currentAccountUsername) return;
+  const messages = folderCache[folder];
+  if (!messages) return;
+  try {
+    localStorage.setItem(cacheKey(currentAccountUsername, folder), JSON.stringify(messages));
+  } catch (err) {
+    console.error(err); // best-effort cache — storage full/unavailable is not fatal
+  }
+}
+
+function loadPersistedFolderCache(username, folder) {
+  try {
+    const raw = localStorage.getItem(cacheKey(username, folder));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function removePersistedFolderCache(folder) {
+  if (!currentAccountUsername) return;
+  localStorage.removeItem(cacheKey(currentAccountUsername, folder));
+}
+
+// Opens a folder for viewing: if it's already loaded this session, defer to
+// the normal cache-or-fetch behavior in loadFolder. Otherwise, paint a stale
+// copy from the on-disk cache (if any) immediately, then always refresh from
+// the server — silently, so a good cache doesn't get blown away by a
+// "Loading..." flash.
+function openFolder(folder) {
+  if (folderCache[folder]) {
+    return loadFolder(folder);
+  }
+  const persisted = loadPersistedFolderCache(currentAccountUsername, folder);
+  if (persisted) {
+    folderCache[folder] = persisted;
+    renderMessageList(folder, persisted);
+  }
+  return loadFolder(folder, { force: true, silent: !!persisted });
+}
+
+function showApp(username) {
+  currentAccountUsername = username;
   setupView.classList.add("hidden");
   appView.classList.remove("hidden");
-  await loadFolder(currentFolder);
-  await checkForNewMail();
+  openFolder(currentFolder).then(() => {
+    knownUnreadUids = new Set((folderCache.INBOX ?? []).filter((m) => m.unread).map((m) => m.uid));
+  });
   setInterval(checkForNewMail, POLL_INTERVAL_MS);
 }
 
 async function init() {
   try {
-    const account = await invoke("get_account");
+    const [account, expired] = await Promise.all([invoke("get_account"), invoke("is_expired")]);
     if (!account) return;
-    if (await invoke("is_expired")) {
+    if (expired) {
       prefillSetupForm(account);
       setupError.textContent = "Your session expired — please re-enter your password.";
       return;
     }
-    await showApp();
+    showApp(account.username);
   } catch (e) {
     console.error(e);
   }
@@ -102,7 +168,7 @@ document.getElementById("account-form").addEventListener("submit", async (e) => 
   setupError.textContent = "";
   try {
     await invoke("save_account", { account, password });
-    await showApp();
+    showApp(account.username);
   } catch (err) {
     setupError.textContent = String(err);
   }
@@ -113,11 +179,26 @@ document.querySelectorAll(".folder-btn").forEach((btn) => {
     document.querySelectorAll(".folder-btn").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     currentFolder = btn.dataset.folder;
-    loadFolder(currentFolder);
+    openFolder(currentFolder);
   });
 });
 
 refreshBtn.addEventListener("click", () => loadFolder(currentFolder, { force: true }));
+
+// Renders a raw date string (IMAP envelope / RFC3339 header text, in whatever
+// timezone the sender's server stamped it) in the viewer's own local time.
+function formatLocalDate(raw) {
+  if (!raw) return "";
+  const parsed = new Date(raw);
+  if (isNaN(parsed.getTime())) return raw;
+  return parsed.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 function renderMessageList(folder, messages) {
   folderTitle.textContent = FOLDER_TITLES[folder] ?? folder;
@@ -132,7 +213,7 @@ function renderMessageList(folder, messages) {
     const item = document.createElement("div");
     item.className = m.unread ? "message-item unread" : "message-item";
     item.dataset.uid = String(m.uid);
-    item.innerHTML = `${m.unread ? '<span class="unread-dot"></span>' : ""}<strong>${escapeHtml(m.from)}</strong><br/><span class="subject">${escapeHtml(m.subject)}</span><br/><span class="date">${escapeHtml(m.date)}</span>`;
+    item.innerHTML = `${m.unread ? '<span class="unread-dot"></span>' : ""}<strong>${escapeHtml(m.from)}</strong><br/><span class="subject">${escapeHtml(m.subject)}</span><br/><span class="date">${escapeHtml(formatLocalDate(m.date))}</span>`;
     item.addEventListener("click", () => {
       messageList.querySelectorAll(".message-item").forEach((el) => el.classList.remove("active"));
       item.classList.add("active");
@@ -152,7 +233,7 @@ function updateUnreadBadge(inboxMessages) {
   }
 }
 
-async function loadFolder(folder, { force = false } = {}) {
+async function loadFolder(folder, { force = false, silent = false } = {}) {
   messageDetail.innerHTML = "<p class='placeholder'>Select a message</p>";
   currentMessage = null;
 
@@ -161,14 +242,19 @@ async function loadFolder(folder, { force = false } = {}) {
     return;
   }
 
-  messageList.innerHTML = "<p class='placeholder'>Loading...</p>";
+  if (!silent) messageList.innerHTML = "<p class='placeholder'>Loading...</p>";
   refreshBtn.classList.add("spinning");
   try {
     const messages = await invoke("list_messages", { folder });
     folderCache[folder] = messages;
+    persistFolderCache(folder);
     renderMessageList(folder, messages);
   } catch (err) {
-    messageList.innerHTML = `<p class="error">${escapeHtml(String(err))}</p>`;
+    if (silent) {
+      console.error(err); // keep showing the cached list already on screen instead of replacing it with an error
+    } else {
+      messageList.innerHTML = `<p class="error">${escapeHtml(String(err))}</p>`;
+    }
   } finally {
     refreshBtn.classList.remove("spinning");
   }
@@ -176,45 +262,51 @@ async function loadFolder(folder, { force = false } = {}) {
 
 function invalidateFolder(folder) {
   delete folderCache[folder];
+  removePersistedFolderCache(folder);
   if (currentFolder === folder) loadFolder(folder, { force: true });
 }
 
-async function confirmAndMove(question, command, destFolder) {
+async function confirmAndMove(question, command, destFolder, statusLabels) {
   if (await confirm(question, { title: "tinymail", kind: "warning" })) {
-    moveCurrentMessage(command, destFolder);
+    moveCurrentMessage(command, destFolder, statusLabels);
   }
 }
 
-async function moveCurrentMessage(command, destFolder) {
+// Optimistic: drops the message from the UI and shows an in-progress toast
+// immediately, then runs the IMAP command in the background instead of
+// blocking on it. On failure, the folder is force-refreshed to reconcile the
+// view with what the server actually did.
+function moveCurrentMessage(command, destFolder, { inProgress = "Working...", done = "Done" } = {}) {
   if (!currentMessage) return;
   const { folder, uid } = currentMessage;
-  try {
-    await invoke(command, { folder, uid });
-  } catch (err) {
-    alert(String(err));
-    return;
-  }
   currentMessage = null;
   messageDetail.innerHTML = "<p class='placeholder'>Select a message</p>";
 
-  // The message already left `folder` server-side, so just drop it from the
-  // cached list in place instead of paying for a full IMAP refetch — a
-  // network round trip we already know the answer to. `destFolder`'s cache
-  // is still stale (fresh content, wrong position — see list ordering fix),
-  // so that one does need a real refetch, but only lazily, next time it's opened.
   if (folderCache[folder]) {
     folderCache[folder] = folderCache[folder].filter((m) => m.uid !== uid);
+    persistFolderCache(folder);
     if (currentFolder === folder) renderMessageList(folder, folderCache[folder]);
     else if (folder === "INBOX") updateUnreadBadge(folderCache[folder]);
   }
-  delete folderCache[destFolder];
+  if (destFolder) {
+    delete folderCache[destFolder];
+    removePersistedFolderCache(destFolder);
+  }
+
+  showToast(inProgress);
+  invoke(command, { folder, uid })
+    .then(() => showToast(done, { autoHideMs: 2000 }))
+    .catch((err) => {
+      showToast(`Failed: ${err}`, { autoHideMs: 4000 });
+      if (currentFolder === folder) loadFolder(folder, { force: true });
+    });
 }
 
 async function showMessage(folder, uid) {
   messageDetail.innerHTML = "<p class='placeholder'>Loading...</p>";
   try {
     const msg = await invoke("get_message", { folder, uid });
-    currentMessage = { folder, uid, from: msg.from, subject: msg.subject, body: msg.body };
+    currentMessage = { folder, uid, from: msg.from, to: msg.to, date: msg.date, subject: msg.subject, body: msg.body };
     const bodyHtml = msg.body_html
       ? `<iframe id="message-body-frame" sandbox="allow-same-origin" title="Message body"></iframe>`
       : `<div class="body">${formatBody(msg.body)}</div>`;
@@ -231,9 +323,10 @@ async function showMessage(folder, uid) {
       <h2>${escapeHtml(msg.subject)}</h2>
       <p><strong>From:</strong> ${escapeHtml(msg.from)}</p>
       <p><strong>To:</strong> ${escapeHtml(msg.to)}</p>
-      <p><strong>Date:</strong> ${escapeHtml(msg.date)}</p>
+      <p><strong>Date:</strong> ${escapeHtml(formatLocalDate(msg.date))}</p>
       <div class="message-toolbar">
         <button id="reply-btn">Reply</button>
+        <button id="forward-btn">Forward</button>
         ${
           folder === "ARCHIVE"
             ? `<button id="unarchive-btn">Unarchive</button>`
@@ -248,18 +341,24 @@ async function showMessage(folder, uid) {
       ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
     `;
     document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
-    document.getElementById("archive-btn")?.addEventListener("click", () => moveCurrentMessage("archive_message", "ARCHIVE"));
+    document.getElementById("forward-btn").addEventListener("click", () => openCompose(forwardPrefill(currentMessage)));
+    document.getElementById("archive-btn")?.addEventListener("click", () =>
+      moveCurrentMessage("archive_message", "ARCHIVE", { inProgress: "Archiving...", done: "Archived" })
+    );
     document.getElementById("unarchive-btn")?.addEventListener("click", () =>
-      confirmAndMove("Unarchive this message?", "unarchive_message", "INBOX")
+      confirmAndMove("Unarchive this message?", "unarchive_message", "INBOX", { inProgress: "Unarchiving...", done: "Unarchived" })
     );
     document.getElementById("restore-btn")?.addEventListener("click", () =>
-      confirmAndMove("Restore this message to Inbox?", "restore_message", "INBOX")
+      confirmAndMove("Restore this message to Inbox?", "restore_message", "INBOX", { inProgress: "Restoring...", done: "Restored" })
     );
     document.getElementById("delete-forever-btn")?.addEventListener("click", () =>
-      confirmAndMove("Permanently delete this message? This cannot be undone.", "permanently_delete_message")
+      confirmAndMove("Permanently delete this message? This cannot be undone.", "permanently_delete_message", null, {
+        inProgress: "Deleting...",
+        done: "Deleted",
+      })
     );
     document.getElementById("delete-btn")?.addEventListener("click", () =>
-      confirmAndMove("Delete this message?", "delete_message", "TRASH")
+      confirmAndMove("Delete this message?", "delete_message", "TRASH", { inProgress: "Deleting...", done: "Deleted" })
     );
     markMessageRead(folder, uid);
     if (msg.body_html) renderHtmlBody(document.getElementById("message-body-frame"), msg.body_html);
@@ -306,9 +405,22 @@ function replyPrefill(msg) {
   };
 }
 
+function forwardPrefill(msg) {
+  const subject = /^fwd:/i.test(msg.subject) ? msg.subject : `Fwd: ${msg.subject}`;
+  const header = `---------- Forwarded message ----------\nFrom: ${msg.from}\nDate: ${formatLocalDate(msg.date)}\nSubject: ${msg.subject}\nTo: ${msg.to}`;
+  return {
+    to: "",
+    subject,
+    body: `\n\n${header}\n\n${msg.body}`,
+  };
+}
+
 async function markMessageRead(folder, uid) {
+  // Only skip the round trip when we positively know it's already read —
+  // the message may not be in the cache at all (e.g. a stale on-disk cache
+  // that a background refresh hasn't replaced yet).
   const cached = folderCache[folder]?.find((m) => m.uid === uid);
-  if (!cached || !cached.unread) return; // already read, or list not cached — nothing to update
+  if (cached && !cached.unread) return;
 
   try {
     await invoke("mark_read", { folder, uid });
@@ -316,8 +428,11 @@ async function markMessageRead(folder, uid) {
     console.error(err);
     return;
   }
-  cached.unread = false;
-  if (folder === "INBOX") updateUnreadBadge(folderCache.INBOX);
+  if (cached) {
+    cached.unread = false;
+    persistFolderCache(folder);
+  }
+  if (folder === "INBOX") updateUnreadBadge(folderCache.INBOX ?? []);
   const item = messageList.querySelector(`.message-item[data-uid="${uid}"]`);
   if (item) {
     item.classList.remove("unread");
@@ -334,6 +449,7 @@ async function checkForNewMail() {
     return;
   }
   folderCache.INBOX = messages;
+  persistFolderCache("INBOX");
   if (currentFolder === "INBOX") renderMessageList("INBOX", messages);
   else updateUnreadBadge(messages);
 
@@ -366,14 +482,12 @@ async function save_file_dialog(defaultName) {
 // Compose modal
 const composeModal = document.getElementById("compose-modal");
 const composeForm = document.getElementById("compose-form");
-const composeError = document.getElementById("compose-error");
 const attachmentListEl = document.getElementById("attachment-list");
 
 function openCompose(prefill = {}) {
   attachmentPaths = [];
   attachmentListEl.innerHTML = "";
   composeForm.reset();
-  composeError.textContent = "";
   if (prefill.to) composeForm.elements.to.value = prefill.to;
   if (prefill.subject) composeForm.elements.subject.value = prefill.subject;
   if (prefill.body) composeForm.elements.body.value = prefill.body;
@@ -421,22 +535,27 @@ function guessImageType(filename) {
   return types[ext] || "";
 }
 
-async function submitCompose(shouldSend) {
+// Closes the modal immediately and lets send/save-draft run in the
+// background instead of blocking the UI on the SMTP/IMAP round trip;
+// progress and outcome surface via the bottom-left status toast.
+function submitCompose(shouldSend) {
   const form = new FormData(composeForm);
   const payload = {
     to: form.get("to"),
     subject: form.get("subject") || "",
     body: form.get("body") || "",
-    attachmentPaths,
+    attachmentPaths: [...attachmentPaths],
   };
-  composeError.textContent = "";
-  try {
-    await invoke(shouldSend ? "send_email" : "save_draft", payload);
-    composeModal.classList.add("hidden");
-    invalidateFolder(shouldSend ? "SENT" : "DRAFTS");
-  } catch (err) {
-    composeError.textContent = String(err);
-  }
+  composeModal.classList.add("hidden");
+  const inProgress = shouldSend ? "Sending..." : "Saving draft...";
+  const done = shouldSend ? "Sent" : "Draft saved";
+  showToast(inProgress);
+  invoke(shouldSend ? "send_email" : "save_draft", payload)
+    .then(() => {
+      showToast(done, { autoHideMs: 2000 });
+      invalidateFolder(shouldSend ? "SENT" : "DRAFTS");
+    })
+    .catch((err) => showToast(`Failed: ${err}`, { autoHideMs: 4000 }));
 }
 
 composeForm.addEventListener("submit", (e) => {
@@ -507,8 +626,8 @@ function renderHtmlBody(iframe, html) {
 // only ever insert markup we generated ourselves (never raw user/email content).
 // Sentinel uses Unicode Private-Use-Area code points, which can't appear in
 // normal text, so stashed placeholders can never collide with real content.
-const PLACEHOLDER_START = "\uE000";
-const PLACEHOLDER_END = "\uE001";
+const PLACEHOLDER_START = "";
+const PLACEHOLDER_END = "";
 
 function formatBody(raw) {
   let text = escapeHtml(raw);

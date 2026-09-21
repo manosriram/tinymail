@@ -95,6 +95,37 @@ pub struct MessageDetail {
     pub attachments: Vec<AttachmentInfo>,
 }
 
+fn envelope_to_summary(f: &imap::types::Fetch) -> Option<MessageSummary> {
+    let uid = f.uid?;
+    let envelope = f.envelope()?;
+    let unread = !f.flags().contains(&imap::types::Flag::Seen);
+    let from = envelope
+        .from
+        .as_ref()
+        .and_then(|addrs| addrs.first())
+        .map(|a| {
+            let mailbox = a
+                .mailbox
+                .map(|m| String::from_utf8_lossy(m).to_string())
+                .unwrap_or_default();
+            let host = a
+                .host
+                .map(|h| String::from_utf8_lossy(h).to_string())
+                .unwrap_or_default();
+            format!("{}@{}", mailbox, host)
+        })
+        .unwrap_or_default();
+    let subject = envelope
+        .subject
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .unwrap_or_default();
+    let date = envelope
+        .date
+        .map(|d| String::from_utf8_lossy(d).to_string())
+        .unwrap_or_default();
+    Some(MessageSummary { uid, from, subject, date, unread })
+}
+
 pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, folder: &str) -> Result<Vec<MessageSummary>, String> {
     let mailbox_name = resolve_folder(account, folder);
     with_connected(cache, account, password, |session| {
@@ -110,39 +141,7 @@ pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, fo
             .fetch(range, "(UID ENVELOPE FLAGS)")
             .map_err(|e| e.to_string())?;
 
-        let mut summaries: Vec<MessageSummary> = fetches
-            .iter()
-            .filter_map(|f| {
-                let uid = f.uid?;
-                let envelope = f.envelope()?;
-                let unread = !f.flags().contains(&imap::types::Flag::Seen);
-                let from = envelope
-                    .from
-                    .as_ref()
-                    .and_then(|addrs| addrs.first())
-                    .map(|a| {
-                        let mailbox = a
-                            .mailbox
-                            .map(|m| String::from_utf8_lossy(m).to_string())
-                            .unwrap_or_default();
-                        let host = a
-                            .host
-                            .map(|h| String::from_utf8_lossy(h).to_string())
-                            .unwrap_or_default();
-                        format!("{}@{}", mailbox, host)
-                    })
-                    .unwrap_or_default();
-                let subject = envelope
-                    .subject
-                    .map(|s| String::from_utf8_lossy(s).to_string())
-                    .unwrap_or_default();
-                let date = envelope
-                    .date
-                    .map(|d| String::from_utf8_lossy(d).to_string())
-                    .unwrap_or_default();
-                Some(MessageSummary { uid, from, subject, date, unread })
-            })
-            .collect();
+        let mut summaries: Vec<MessageSummary> = fetches.iter().filter_map(envelope_to_summary).collect();
 
         // Sort by each message's actual Date header rather than trusting IMAP
         // sequence/arrival order: a message COPY'd into a mailbox (unarchive,

@@ -532,6 +532,7 @@ function openCompose(prefill = {}) {
   attachmentListEl.innerHTML = "";
   composeForm.reset();
   if (prefill.to) composeForm.elements.to.value = prefill.to;
+  if (prefill.cc) composeForm.elements.cc.value = prefill.cc;
   if (prefill.subject) composeForm.elements.subject.value = prefill.subject;
   if (prefill.body) composeForm.elements.body.value = prefill.body;
   composeModal.classList.remove("hidden");
@@ -585,10 +586,15 @@ function submitCompose(shouldSend) {
   const form = new FormData(composeForm);
   const payload = {
     to: form.get("to"),
+    cc: form.get("cc") || "",
     subject: form.get("subject") || "",
     body: form.get("body") || "",
     attachmentPaths: [...attachmentPaths],
   };
+  // Bcc only ever goes to send_email — save_draft has nowhere safe to persist
+  // it (a draft has no envelope, and writing it into a header would defeat
+  // the point of Bcc once the draft is later sent or read back).
+  if (shouldSend) payload.bcc = form.get("bcc") || "";
   composeModal.classList.add("hidden");
   const inProgress = shouldSend ? "Sending..." : "Saving draft...";
   const done = shouldSend ? "Sent" : "Draft saved";

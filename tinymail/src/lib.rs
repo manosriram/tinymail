@@ -180,6 +180,8 @@ async fn read_file_base64(path: String) -> Result<String, String> {
 #[tauri::command]
 async fn send_email(
     to: String,
+    cc: String,
+    bcc: String,
     subject: String,
     body: String,
     attachment_paths: Vec<String>,
@@ -188,7 +190,7 @@ async fn send_email(
     let cache = cache.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (account, password) = current_account()?;
-        mail::send_email(&cache, &account, &password, &to, &subject, &body, &attachment_paths)
+        mail::send_email(&cache, &account, &password, &to, &cc, &bcc, &subject, &body, &attachment_paths)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -197,6 +199,7 @@ async fn send_email(
 #[tauri::command]
 async fn save_draft(
     to: String,
+    cc: String,
     subject: String,
     body: String,
     attachment_paths: Vec<String>,
@@ -205,7 +208,7 @@ async fn save_draft(
     let cache = cache.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (account, password) = current_account()?;
-        mail::save_draft(&cache, &account, &password, &to, &subject, &body, &attachment_paths)
+        mail::save_draft(&cache, &account, &password, &to, &cc, &subject, &body, &attachment_paths)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -1,6 +1,6 @@
 use crate::account::Account;
 use base64::Engine;
-use lettre::message::{Attachment, MultiPart, SinglePart};
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use mail_parser::{MessageParser, MimeHeaders};
@@ -402,9 +402,22 @@ pub fn get_attachment_data(
     })
 }
 
+/// Parses a comma-separated list of addresses (as typed into the Cc/Bcc
+/// fields) into mailboxes, skipping blank entries so an empty or
+/// trailing-comma field just yields no recipients rather than an error.
+fn parse_addresses(input: &str) -> Result<Vec<Mailbox>, String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<Mailbox>().map_err(|e| e.to_string()))
+        .collect()
+}
+
 fn build_message(
     account: &Account,
     to: &str,
+    cc: &str,
     subject: &str,
     body: &str,
     attachment_paths: &[String],
@@ -425,12 +438,16 @@ fn build_message(
         multipart = multipart.singlepart(Attachment::new(filename).body(bytes, content_type));
     }
 
-    let message = Message::builder()
+    let mut builder = Message::builder()
         .from(account.username.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
         .to(to.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
-        .subject(subject)
-        .multipart(multipart)
-        .map_err(|e| e.to_string())?;
+        .subject(subject);
+    // Cc, unlike Bcc, is a real header — every recipient is meant to see it.
+    for mbox in parse_addresses(cc)? {
+        builder = builder.cc(mbox);
+    }
+
+    let message = builder.multipart(multipart).map_err(|e| e.to_string())?;
 
     Ok(message.formatted())
 }
@@ -440,11 +457,13 @@ pub fn send_email(
     account: &Account,
     password: &str,
     to: &str,
+    cc: &str,
+    bcc: &str,
     subject: &str,
     body: &str,
     attachment_paths: &[String],
 ) -> Result<(), String> {
-    let raw = build_message(account, to, subject, body, attachment_paths)?;
+    let raw = build_message(account, to, cc, subject, body, attachment_paths)?;
 
     let creds = Credentials::new(account.username.clone(), password.to_string());
     let transport = SmtpTransport::relay(&account.smtp_host)
@@ -453,10 +472,19 @@ pub fn send_email(
         .credentials(creds)
         .build();
 
+    // The envelope's recipient list is what actually determines delivery
+    // (SMTP RCPT TO), separately from the To/Cc headers baked into the raw
+    // message above. Bcc recipients go only here — never into a header —
+    // since a Bcc header in the raw bytes would leak them to everyone else
+    // who received the mail.
+    let mut recipients = vec![to.parse().map_err(|e: lettre::address::AddressError| e.to_string())?];
+    recipients.extend(parse_addresses(cc)?.into_iter().map(|m| m.email));
+    recipients.extend(parse_addresses(bcc)?.into_iter().map(|m| m.email));
+
     transport.send_raw(
         &lettre::address::Envelope::new(
             Some(account.username.parse().map_err(|e: lettre::address::AddressError| e.to_string())?),
-            vec![to.parse().map_err(|e: lettre::address::AddressError| e.to_string())?],
+            recipients,
         )
         .map_err(|e| e.to_string())?,
         &raw,
@@ -477,11 +505,12 @@ pub fn save_draft(
     account: &Account,
     password: &str,
     to: &str,
+    cc: &str,
     subject: &str,
     body: &str,
     attachment_paths: &[String],
 ) -> Result<(), String> {
-    let raw = build_message(account, to, subject, body, attachment_paths)?;
+    let raw = build_message(account, to, cc, subject, body, attachment_paths)?;
     with_session(cache, account, password, |session| {
         session.append(&account.drafts_folder, &raw).map_err(|e| e.to_string())
     })
@@ -697,12 +726,36 @@ mod tests {
     #[test]
     fn build_message_includes_headers_and_body() {
         let account = test_account();
-        let raw = build_message(&account, "dest@example.com", "Test Subject", "Test body content", &[]).unwrap();
+        let raw = build_message(&account, "dest@example.com", "", "Test Subject", "Test body content", &[]).unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
         assert!(raw_str.contains("Test Subject"));
         assert!(raw_str.contains("dest@example.com"));
         assert!(raw_str.contains(&account.username));
         assert!(raw_str.contains("Test body content"));
+    }
+
+    #[test]
+    fn build_message_includes_cc_header_for_each_address() {
+        let account = test_account();
+        let raw = build_message(
+            &account,
+            "dest@example.com",
+            "cc1@example.com, cc2@example.com",
+            "Subject",
+            "Body",
+            &[],
+        )
+        .unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.contains("Cc: cc1@example.com, cc2@example.com"));
+    }
+
+    #[test]
+    fn build_message_ignores_blank_cc_field() {
+        let account = test_account();
+        let raw = build_message(&account, "dest@example.com", "  , ", "Subject", "Body", &[]).unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(!raw_str.contains("Cc:"));
     }
 
     #[test]
@@ -715,6 +768,7 @@ mod tests {
         let raw = build_message(
             &account,
             "dest@example.com",
+            "",
             "Subject",
             "Body",
             &[path.to_string_lossy().to_string()],
@@ -734,6 +788,7 @@ mod tests {
         let result = build_message(
             &account,
             "dest@example.com",
+            "",
             "Subject",
             "Body",
             &["/nonexistent/tinymail-test-path/file.txt".to_string()],

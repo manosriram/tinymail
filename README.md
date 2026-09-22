@@ -19,8 +19,8 @@ archive_folder: Archive
 trash_folder: Trash
 ```
 
-<img width="800" alt="tinymail inbox" src="assets/Screenshot 2026-09-22 at 11.20.06 PM.png" />
+<img width="800" alt="tinymail inbox" src="assets/inbox.png" />
 
-<img width="800" alt="tinymail message view" src="assets/Screenshot 2026-09-22 at 11.20.25 PM.png" />
+<img width="800" alt="tinymail message view" src="assets/message-view.png" />
 
-<img width="800" alt="tinymail compose" src="assets/Screenshot 2026-09-22 at 11.20.33 PM.png" />
+<img width="800" alt="tinymail compose" src="assets/compose.png" />

@@ -12,11 +12,18 @@ pub type ImapSession = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 /// Caches one authenticated IMAP session per app run so folder navigation only
 /// pays for a SELECT, not a fresh TCP connect + TLS handshake + LOGIN each click.
-pub struct SessionCache(Mutex<Option<ImapSession>>);
+/// Also remembers which mailbox is currently SELECTed on that session, so an
+/// action that targets the same folder as the last one (e.g. opening a message
+/// right after listing it) can skip SELECT too — it's a round trip in its own
+/// right, and often the dominant cost of "open a mail" on a slow connection.
+pub struct SessionCache {
+    session: Mutex<Option<ImapSession>>,
+    selected: Mutex<String>,
+}
 
 impl SessionCache {
     pub fn new() -> Self {
-        Self(Mutex::new(None))
+        Self { session: Mutex::new(None), selected: Mutex::new(String::new()) }
     }
 }
 
@@ -37,23 +44,47 @@ fn imap_connect(account: &Account, password: &str) -> Result<ImapSession, String
 
 /// Runs `f` against a cached, already-authenticated session; reconnects once and
 /// retries if the cached session turned out to be dead (network drop, timeout, etc).
-fn with_connected<F, R>(cache: &SessionCache, account: &Account, password: &str, f: F) -> Result<R, String>
+/// Does not touch mailbox selection — for commands like APPEND that don't need one.
+fn with_session<F, R>(cache: &SessionCache, account: &Account, password: &str, f: F) -> Result<R, String>
 where
     F: Fn(&mut ImapSession) -> Result<R, String>,
 {
-    let mut guard = cache.0.lock().map_err(|_| "session lock poisoned".to_string())?;
+    let mut guard = cache.session.lock().map_err(|_| "session lock poisoned".to_string())?;
     if guard.is_none() {
         *guard = Some(imap_connect(account, password)?);
+        *cache.selected.lock().unwrap() = String::new();
     }
     match f(guard.as_mut().unwrap()) {
         Ok(v) => Ok(v),
         Err(_) => {
             let mut fresh = imap_connect(account, password)?;
+            // A reconnected session has nothing SELECTed yet — clear the tracked
+            // mailbox before the retry so with_connected's skip-check below can't
+            // mistake a stale value for "already selected on this session".
+            *cache.selected.lock().unwrap() = String::new();
             let retry = f(&mut fresh);
             *guard = Some(fresh);
             retry
         }
     }
+}
+
+/// Same as `with_session`, but first SELECTs `mailbox` — skipped when the session
+/// already has that mailbox selected, saving a round trip on back-to-back actions
+/// against the same folder (list → open, open → archive, ...).
+fn with_connected<F, R>(cache: &SessionCache, account: &Account, password: &str, mailbox: &str, f: F) -> Result<R, String>
+where
+    F: Fn(&mut ImapSession) -> Result<R, String>,
+{
+    with_session(cache, account, password, |session| {
+        let mut selected = cache.selected.lock().map_err(|_| "session lock poisoned".to_string())?;
+        if selected.as_str() != mailbox {
+            session.select(mailbox).map_err(|e| e.to_string())?;
+            *selected = mailbox.to_string();
+        }
+        drop(selected);
+        f(session)
+    })
 }
 
 fn resolve_folder(account: &Account, folder: &str) -> String {
@@ -128,8 +159,11 @@ fn envelope_to_summary(f: &imap::types::Fetch) -> Option<MessageSummary> {
 
 pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, folder: &str) -> Result<Vec<MessageSummary>, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
+    // Always a real SELECT (never the skip-if-same-mailbox path): the whole point
+    // is to learn the current message count, which a stale SELECT can't tell us.
+    with_session(cache, account, password, |session| {
         let mailbox = session.select(&mailbox_name).map_err(|e| e.to_string())?;
+        *cache.selected.lock().unwrap() = mailbox_name.clone();
         if mailbox.exists == 0 {
             return Ok(vec![]);
         }
@@ -167,6 +201,10 @@ fn sanitize_html(html: &str) -> String {
         .add_tags(["style"])
         .rm_clean_content_tags(["style"])
         .add_generic_attributes(["style", "class", "align", "valign", "bgcolor", "width", "height"])
+        // Inline images (logos, signature graphics) get embedded as data: URIs
+        // before sanitizing — allow that scheme through. Safe for <img src>:
+        // browsers never execute a data: URI as script in that context.
+        .add_url_schemes(["data"])
         .clean(html)
         .to_string()
 }
@@ -193,27 +231,53 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         .date()
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
-    let body_html = parsed.body_html(0).map(|html| sanitize_html(&html));
+    let mut html_body = parsed.body_html(0).map(|html| html.to_string());
     let body = parsed.body_text(0).map(|b| b.to_string()).unwrap_or_default();
 
-    let attachments = parsed
-        .attachments()
-        .map(|a| {
-            let filename = a.attachment_name().unwrap_or("attachment").to_string();
-            let content_type = mime_guess::from_path(&filename)
-                .first_or_octet_stream()
-                .to_string();
-            AttachmentInfo { filename, size: a.contents().len(), content_type }
-        })
-        .collect();
+    // mail_parser puts every non-body part in `attachments()`, including inline
+    // images (logos, signature graphics) that the HTML references via `cid:` —
+    // those aren't meant to be downloadable files, they're part of the message.
+    // Embed any part whose Content-ID is actually referenced in the HTML as a
+    // data: URI in place, and leave it out of the attachment list; everything
+    // else (real attachments, and unreferenced inline parts) is listed as before.
+    let mut attachments = Vec::new();
+    for a in parsed.attachments() {
+        let cid_ref = a.content_id().map(|cid| format!("cid:{cid}"));
+        let referenced = match (&cid_ref, &html_body) {
+            (Some(cid_ref), Some(html)) => html.contains(cid_ref.as_str()),
+            _ => false,
+        };
+        if referenced {
+            let content_type = a
+                .content_type()
+                .map(|ct| format!("{}/{}", ct.c_type, ct.c_subtype.as_deref().unwrap_or("octet-stream")))
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let data_uri = format!(
+                "data:{};base64,{}",
+                content_type,
+                base64::engine::general_purpose::STANDARD.encode(a.contents())
+            );
+            if let Some(html) = html_body.as_mut() {
+                *html = html.replace(cid_ref.as_ref().unwrap(), &data_uri);
+            }
+            continue;
+        }
+
+        let filename = a.attachment_name().unwrap_or("attachment").to_string();
+        let content_type = mime_guess::from_path(&filename)
+            .first_or_octet_stream()
+            .to_string();
+        attachments.push(AttachmentInfo { filename, size: a.contents().len(), content_type });
+    }
+
+    let body_html = html_body.map(|html| sanitize_html(&html));
 
     Ok(MessageDetail { from, to, subject, date, body, body_html, attachments })
 }
 
 pub fn get_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<MessageDetail, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         let fetches = session
             .uid_fetch(uid.to_string(), "BODY[]")
             .map_err(|e| e.to_string())?;
@@ -225,8 +289,7 @@ pub fn get_message(cache: &SessionCache, account: &Account, password: &str, fold
 
 pub fn mark_read(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
             .map_err(|e| e.to_string())?;
@@ -246,8 +309,7 @@ fn move_message(
     dest_mailbox: &str,
 ) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         session.uid_copy(uid.to_string(), dest_mailbox).map_err(|e| e.to_string())?;
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
@@ -277,8 +339,7 @@ pub fn restore_message(cache: &SessionCache, account: &Account, password: &str, 
 /// first. Unlike `move_message`, this is not recoverable.
 pub fn permanently_delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .map_err(|e| e.to_string())?;
@@ -298,8 +359,7 @@ pub fn save_attachment(
 ) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
     let dest_path = dest_path.to_string();
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         let fetches = session
             .uid_fetch(uid.to_string(), "BODY[]")
             .map_err(|e| e.to_string())?;
@@ -325,8 +385,7 @@ pub fn get_attachment_data(
     filename: &str,
 ) -> Result<String, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         let fetches = session
             .uid_fetch(uid.to_string(), "BODY[]")
             .map_err(|e| e.to_string())?;
@@ -406,7 +465,7 @@ pub fn send_email(
 
     // Best-effort copy into Sent — many custom IMAP servers don't auto-populate it.
     // ponytail: no dedup against providers that DO auto-copy; harmless duplicate in that case, fine for v1.
-    let _ = with_connected(cache, account, password, |session| {
+    let _ = with_session(cache, account, password, |session| {
         session.append(&account.sent_folder, &raw).map_err(|e| e.to_string())
     });
 
@@ -423,7 +482,7 @@ pub fn save_draft(
     attachment_paths: &[String],
 ) -> Result<(), String> {
     let raw = build_message(account, to, subject, body, attachment_paths)?;
-    with_connected(cache, account, password, |session| {
+    with_session(cache, account, password, |session| {
         session.append(&account.drafts_folder, &raw).map_err(|e| e.to_string())
     })
 }
@@ -605,6 +664,34 @@ mod tests {
         assert_eq!(detail.attachments.len(), 1);
         assert_eq!(detail.attachments[0].filename, "test.txt");
         assert_eq!(detail.attachments[0].size, "hello".len());
+    }
+
+    #[test]
+    fn cid_referenced_image_is_inlined_not_listed_as_attachment() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Subject: With Logo\r\n\
+                    MIME-Version: 1.0\r\n\
+                    Content-Type: multipart/related; boundary=\"BOUNDARY\"\r\n\
+                    \r\n\
+                    --BOUNDARY\r\n\
+                    Content-Type: text/html; charset=utf-8\r\n\
+                    \r\n\
+                    <p>Hi</p><img src=\"cid:logo123\">\r\n\
+                    --BOUNDARY\r\n\
+                    Content-Type: image/png\r\n\
+                    Content-Disposition: inline; filename=\"logo.png\"\r\n\
+                    Content-ID: <logo123>\r\n\
+                    Content-Transfer-Encoding: base64\r\n\
+                    \r\n\
+                    aGVsbG8=\r\n\
+                    --BOUNDARY--\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert!(detail.attachments.is_empty());
+        let html = detail.body_html.expect("html body should be present");
+        assert!(!html.contains("cid:logo123"));
+        assert!(html.contains("data:image/png;base64,"));
     }
 
     #[test]

@@ -118,6 +118,8 @@ pub struct AttachmentInfo {
 pub struct MessageDetail {
     pub from: String,
     pub to: String,
+    #[serde(default)]
+    pub cc: String,
     pub subject: String,
     pub date: String,
     pub body: String,
@@ -201,10 +203,12 @@ fn sanitize_html(html: &str) -> String {
         .add_tags(["style"])
         .rm_clean_content_tags(["style"])
         .add_generic_attributes(["style", "class", "align", "valign", "bgcolor", "width", "height"])
-        // Inline images (logos, signature graphics) get embedded as data: URIs
-        // before sanitizing — allow that scheme through. Safe for <img src>:
-        // browsers never execute a data: URI as script in that context.
-        .add_url_schemes(["data"])
+        // cid: references (inline images) need to survive sanitization intact
+        // so parse_message_detail can swap them for data: URIs afterward —
+        // deliberately *after* sanitizing, so ammonia only ever parses the
+        // small HTML skeleton instead of megabytes of embedded base64 image
+        // data (which made opening image-heavy HTML mail take several seconds).
+        .add_url_schemes(["cid"])
         .clean(html)
         .to_string()
 }
@@ -226,12 +230,21 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         .and_then(|a| a.address())
         .unwrap_or_default()
         .to_string();
+    let cc = parsed
+        .cc()
+        .and_then(|c| c.as_list())
+        .map(|addrs| addrs.iter().filter_map(|a| a.address()).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
     let subject = parsed.subject().unwrap_or_default().to_string();
     let date = parsed
         .date()
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
-    let mut html_body = parsed.body_html(0).map(|html| html.to_string());
+    // Sanitize first, while `cid:` references are still short opaque strings.
+    // Embedding inline images as data: URIs happens below, deliberately after
+    // this — ammonia parsing megabytes of base64 image data (instead of a few
+    // KB of markup) is what was making "open a mail" take several seconds.
+    let mut html_body = parsed.body_html(0).map(|html| sanitize_html(&html));
     let body = parsed.body_text(0).map(|b| b.to_string()).unwrap_or_default();
 
     // mail_parser puts every non-body part in `attachments()`, including inline
@@ -270,9 +283,7 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         attachments.push(AttachmentInfo { filename, size: a.contents().len(), content_type });
     }
 
-    let body_html = html_body.map(|html| sanitize_html(&html));
-
-    Ok(MessageDetail { from, to, subject, date, body, body_html, attachments })
+    Ok(MessageDetail { from, to, cc, subject, date, body, body_html: html_body, attachments })
 }
 
 pub fn get_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<MessageDetail, String> {
@@ -637,6 +648,21 @@ mod tests {
         // ever None when the message has no readable body part at all.
         assert!(detail.body_html.is_some());
         assert!(detail.attachments.is_empty());
+        assert_eq!(detail.cc, "");
+    }
+
+    #[test]
+    fn parse_message_detail_extracts_multiple_cc_addresses() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Cc: carol@example.com, dave@example.com\r\n\
+                    Subject: With Cc\r\n\
+                    Content-Type: text/plain; charset=utf-8\r\n\
+                    \r\n\
+                    Body\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert_eq!(detail.cc, "carol@example.com, dave@example.com");
     }
 
     #[test]

@@ -135,7 +135,12 @@ function showApp(username) {
 // already fully rendered.
 async function showWindow() {
   try {
-    await window.__TAURI__.window.getCurrentWindow().show();
+    const win = window.__TAURI__.window.getCurrentWindow();
+    await win.show();
+    // show() alone can leave the window visible but behind other apps
+    // (notably on macOS, where it doesn't imply activation) — focus it so it
+    // actually comes to the front instead of needing a manual click to raise.
+    await win.setFocus();
   } catch (err) {
     console.error(err);
   }
@@ -324,8 +329,6 @@ function moveCurrentMessage(command, destFolder, { inProgress = "Working...", do
 }
 
 async function showMessage(folder, uid) {
-  markMessageRead(folder, uid);
-
   const cacheKey = `${folder}:${uid}`;
   const cached = messageDetailCache[cacheKey];
   if (cached) {
@@ -333,6 +336,7 @@ async function showMessage(folder, uid) {
     // refresh from the server in case it changed (e.g. read elsewhere) —
     // without re-showing "Loading..." over the content that's already there.
     renderMessage(folder, uid, cached);
+    markMessageRead(folder, uid);
     invoke("get_message", { folder, uid })
       .then((msg) => {
         messageDetailCache[cacheKey] = msg;
@@ -344,16 +348,23 @@ async function showMessage(folder, uid) {
 
   messageDetail.innerHTML = "<p class='placeholder'>Loading...</p>";
   try {
+    // get_message runs alone first — IMAP only allows one command in flight
+    // per connection, so firing mark_read concurrently just makes them fight
+    // over the same session lock. Whichever loses (often this fetch, the one
+    // thing the user is actually waiting on) gets stuck behind the other's
+    // full round trip, including a cold reconnect if the session went idle.
+    // mark_read runs after, once the content is already on screen.
     const msg = await invoke("get_message", { folder, uid });
     messageDetailCache[cacheKey] = msg;
     renderMessage(folder, uid, msg);
+    markMessageRead(folder, uid);
   } catch (err) {
     messageDetail.innerHTML = `<p class="error">${escapeHtml(String(err))}</p>`;
   }
 }
 
 function renderMessage(folder, uid, msg) {
-  currentMessage = { folder, uid, from: msg.from, to: msg.to, date: msg.date, subject: msg.subject, body: msg.body, body_html: msg.body_html };
+  currentMessage = { folder, uid, from: msg.from, to: msg.to, cc: msg.cc, date: msg.date, subject: msg.subject, body: msg.body, body_html: msg.body_html };
   const bodyHtml = msg.body_html
     ? `<iframe id="message-body-frame" sandbox="allow-same-origin" title="Message body"></iframe>`
     : `<div class="body">${formatBody(msg.body)}</div>`;
@@ -370,10 +381,12 @@ function renderMessage(folder, uid, msg) {
     <h2>${escapeHtml(msg.subject)}</h2>
     <p><strong>From:</strong> ${escapeHtml(msg.from)}</p>
     <p><strong>To:</strong> ${escapeHtml(msg.to)}</p>
+    ${msg.cc ? `<p><strong>Cc:</strong> ${escapeHtml(msg.cc)}</p>` : ""}
     <p><strong>Date:</strong> ${escapeHtml(formatLocalDate(msg.date))}</p>
     <div class="message-toolbar">
       <button id="reply-btn">Reply</button>
       <button id="forward-btn">Forward</button>
+      ${folder === "DRAFTS" ? `<button id="send-draft-btn">Send</button>` : ""}
       ${
         folder === "ARCHIVE"
           ? `<button id="unarchive-btn">Unarchive</button>`
@@ -389,6 +402,7 @@ function renderMessage(folder, uid, msg) {
   `;
   document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
   document.getElementById("forward-btn").addEventListener("click", () => openCompose(forwardPrefill(currentMessage)));
+  document.getElementById("send-draft-btn")?.addEventListener("click", () => openCompose(draftPrefill(currentMessage), uid));
   document.getElementById("archive-btn")?.addEventListener("click", () =>
     moveCurrentMessage("archive_message", "ARCHIVE", { inProgress: "Archiving...", done: "Archived" })
   );
@@ -455,6 +469,15 @@ function forwardPrefill(msg) {
     to: "",
     subject,
     body: `\n\n${header}\n\n${msg.body}`,
+  };
+}
+
+function draftPrefill(msg) {
+  return {
+    to: msg.to,
+    cc: msg.cc,
+    subject: msg.subject,
+    body: msg.body,
   };
 }
 
@@ -527,7 +550,13 @@ const composeModal = document.getElementById("compose-modal");
 const composeForm = document.getElementById("compose-form");
 const attachmentListEl = document.getElementById("attachment-list");
 
-function openCompose(prefill = {}) {
+// Set while editing an existing draft (via the Send button on a DRAFTS
+// message) so submitCompose knows to remove the superseded draft afterward
+// instead of leaving a stale duplicate behind. null for a plain new message.
+let editingDraftUid = null;
+
+function openCompose(prefill = {}, draftUid = null) {
+  editingDraftUid = draftUid;
   attachmentPaths = [];
   attachmentListEl.innerHTML = "";
   composeForm.reset();
@@ -595,6 +624,8 @@ function submitCompose(shouldSend) {
   // it (a draft has no envelope, and writing it into a header would defeat
   // the point of Bcc once the draft is later sent or read back).
   if (shouldSend) payload.bcc = form.get("bcc") || "";
+  const supersededDraftUid = editingDraftUid;
+  editingDraftUid = null;
   composeModal.classList.add("hidden");
   const inProgress = shouldSend ? "Sending..." : "Saving draft...";
   const done = shouldSend ? "Sent" : "Draft saved";
@@ -603,6 +634,13 @@ function submitCompose(shouldSend) {
     .then(() => {
       showToast(done, { autoHideMs: 2000 });
       invalidateFolder(shouldSend ? "SENT" : "DRAFTS");
+      // A fresh draft/sent message was just appended above — remove the one
+      // this replaced instead of leaving a stale duplicate sitting in Drafts.
+      if (supersededDraftUid != null) {
+        invoke("permanently_delete_message", { folder: "DRAFTS", uid: supersededDraftUid })
+          .then(() => invalidateFolder("DRAFTS"))
+          .catch((err) => console.error(err));
+      }
     })
     .catch((err) => showToast(`Failed: ${err}`, { autoHideMs: 4000 }));
 }

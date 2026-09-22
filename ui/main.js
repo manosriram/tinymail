@@ -122,6 +122,18 @@ function showApp(username) {
   setInterval(checkForNewMail, POLL_INTERVAL_MS);
 }
 
+// The window starts hidden (see tauri.conf.json) so the OS never paints a
+// blank/grey native window before the webview has anything to show — it's
+// revealed only once we know what to display (setup form or app view),
+// already fully rendered.
+async function showWindow() {
+  try {
+    await window.__TAURI__.window.getCurrentWindow().show();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 async function init() {
   try {
     const [account, expired] = await Promise.all([invoke("get_account"), invoke("is_expired")]);
@@ -134,6 +146,8 @@ async function init() {
     showApp(account.username);
   } catch (e) {
     console.error(e);
+  } finally {
+    showWindow();
   }
 }
 

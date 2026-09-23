@@ -79,6 +79,6 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: tinymail ${{ github.ref_name }}
-          draft: true
+          draft: false
           fail_on_unmatched_files: false
           files: ${{ matrix.bundle_files }}

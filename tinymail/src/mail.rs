@@ -1,6 +1,6 @@
 use crate::account::Account;
 use base64::Engine;
-use lettre::message::{Attachment, MultiPart, SinglePart};
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use mail_parser::{MessageParser, MimeHeaders};
@@ -12,11 +12,18 @@ pub type ImapSession = imap::Session<native_tls::TlsStream<TcpStream>>;
 
 /// Caches one authenticated IMAP session per app run so folder navigation only
 /// pays for a SELECT, not a fresh TCP connect + TLS handshake + LOGIN each click.
-pub struct SessionCache(Mutex<Option<ImapSession>>);
+/// Also remembers which mailbox is currently SELECTed on that session, so an
+/// action that targets the same folder as the last one (e.g. opening a message
+/// right after listing it) can skip SELECT too — it's a round trip in its own
+/// right, and often the dominant cost of "open a mail" on a slow connection.
+pub struct SessionCache {
+    session: Mutex<Option<ImapSession>>,
+    selected: Mutex<String>,
+}
 
 impl SessionCache {
     pub fn new() -> Self {
-        Self(Mutex::new(None))
+        Self { session: Mutex::new(None), selected: Mutex::new(String::new()) }
     }
 }
 
@@ -37,23 +44,47 @@ fn imap_connect(account: &Account, password: &str) -> Result<ImapSession, String
 
 /// Runs `f` against a cached, already-authenticated session; reconnects once and
 /// retries if the cached session turned out to be dead (network drop, timeout, etc).
-fn with_connected<F, R>(cache: &SessionCache, account: &Account, password: &str, f: F) -> Result<R, String>
+/// Does not touch mailbox selection — for commands like APPEND that don't need one.
+fn with_session<F, R>(cache: &SessionCache, account: &Account, password: &str, f: F) -> Result<R, String>
 where
     F: Fn(&mut ImapSession) -> Result<R, String>,
 {
-    let mut guard = cache.0.lock().map_err(|_| "session lock poisoned".to_string())?;
+    let mut guard = cache.session.lock().map_err(|_| "session lock poisoned".to_string())?;
     if guard.is_none() {
         *guard = Some(imap_connect(account, password)?);
+        *cache.selected.lock().unwrap() = String::new();
     }
     match f(guard.as_mut().unwrap()) {
         Ok(v) => Ok(v),
         Err(_) => {
             let mut fresh = imap_connect(account, password)?;
+            // A reconnected session has nothing SELECTed yet — clear the tracked
+            // mailbox before the retry so with_connected's skip-check below can't
+            // mistake a stale value for "already selected on this session".
+            *cache.selected.lock().unwrap() = String::new();
             let retry = f(&mut fresh);
             *guard = Some(fresh);
             retry
         }
     }
+}
+
+/// Same as `with_session`, but first SELECTs `mailbox` — skipped when the session
+/// already has that mailbox selected, saving a round trip on back-to-back actions
+/// against the same folder (list → open, open → archive, ...).
+fn with_connected<F, R>(cache: &SessionCache, account: &Account, password: &str, mailbox: &str, f: F) -> Result<R, String>
+where
+    F: Fn(&mut ImapSession) -> Result<R, String>,
+{
+    with_session(cache, account, password, |session| {
+        let mut selected = cache.selected.lock().map_err(|_| "session lock poisoned".to_string())?;
+        if selected.as_str() != mailbox {
+            session.select(mailbox).map_err(|e| e.to_string())?;
+            *selected = mailbox.to_string();
+        }
+        drop(selected);
+        f(session)
+    })
 }
 
 fn resolve_folder(account: &Account, folder: &str) -> String {
@@ -87,6 +118,8 @@ pub struct AttachmentInfo {
 pub struct MessageDetail {
     pub from: String,
     pub to: String,
+    #[serde(default)]
+    pub cc: String,
     pub subject: String,
     pub date: String,
     pub body: String,
@@ -128,8 +161,11 @@ fn envelope_to_summary(f: &imap::types::Fetch) -> Option<MessageSummary> {
 
 pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, folder: &str) -> Result<Vec<MessageSummary>, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
+    // Always a real SELECT (never the skip-if-same-mailbox path): the whole point
+    // is to learn the current message count, which a stale SELECT can't tell us.
+    with_session(cache, account, password, |session| {
         let mailbox = session.select(&mailbox_name).map_err(|e| e.to_string())?;
+        *cache.selected.lock().unwrap() = mailbox_name.clone();
         if mailbox.exists == 0 {
             return Ok(vec![]);
         }
@@ -167,6 +203,12 @@ fn sanitize_html(html: &str) -> String {
         .add_tags(["style"])
         .rm_clean_content_tags(["style"])
         .add_generic_attributes(["style", "class", "align", "valign", "bgcolor", "width", "height"])
+        // cid: references (inline images) need to survive sanitization intact
+        // so parse_message_detail can swap them for data: URIs afterward —
+        // deliberately *after* sanitizing, so ammonia only ever parses the
+        // small HTML skeleton instead of megabytes of embedded base64 image
+        // data (which made opening image-heavy HTML mail take several seconds).
+        .add_url_schemes(["cid"])
         .clean(html)
         .to_string()
 }
@@ -188,32 +230,65 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
         .and_then(|a| a.address())
         .unwrap_or_default()
         .to_string();
+    let cc = parsed
+        .cc()
+        .and_then(|c| c.as_list())
+        .map(|addrs| addrs.iter().filter_map(|a| a.address()).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
     let subject = parsed.subject().unwrap_or_default().to_string();
     let date = parsed
         .date()
         .map(|d| d.to_rfc3339())
         .unwrap_or_default();
-    let body_html = parsed.body_html(0).map(|html| sanitize_html(&html));
+    // Sanitize first, while `cid:` references are still short opaque strings.
+    // Embedding inline images as data: URIs happens below, deliberately after
+    // this — ammonia parsing megabytes of base64 image data (instead of a few
+    // KB of markup) is what was making "open a mail" take several seconds.
+    let mut html_body = parsed.body_html(0).map(|html| sanitize_html(&html));
     let body = parsed.body_text(0).map(|b| b.to_string()).unwrap_or_default();
 
-    let attachments = parsed
-        .attachments()
-        .map(|a| {
-            let filename = a.attachment_name().unwrap_or("attachment").to_string();
-            let content_type = mime_guess::from_path(&filename)
-                .first_or_octet_stream()
-                .to_string();
-            AttachmentInfo { filename, size: a.contents().len(), content_type }
-        })
-        .collect();
+    // mail_parser puts every non-body part in `attachments()`, including inline
+    // images (logos, signature graphics) that the HTML references via `cid:` —
+    // those aren't meant to be downloadable files, they're part of the message.
+    // Embed any part whose Content-ID is actually referenced in the HTML as a
+    // data: URI in place, and leave it out of the attachment list; everything
+    // else (real attachments, and unreferenced inline parts) is listed as before.
+    let mut attachments = Vec::new();
+    for a in parsed.attachments() {
+        let cid_ref = a.content_id().map(|cid| format!("cid:{cid}"));
+        let referenced = match (&cid_ref, &html_body) {
+            (Some(cid_ref), Some(html)) => html.contains(cid_ref.as_str()),
+            _ => false,
+        };
+        if referenced {
+            let content_type = a
+                .content_type()
+                .map(|ct| format!("{}/{}", ct.c_type, ct.c_subtype.as_deref().unwrap_or("octet-stream")))
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let data_uri = format!(
+                "data:{};base64,{}",
+                content_type,
+                base64::engine::general_purpose::STANDARD.encode(a.contents())
+            );
+            if let Some(html) = html_body.as_mut() {
+                *html = html.replace(cid_ref.as_ref().unwrap(), &data_uri);
+            }
+            continue;
+        }
 
-    Ok(MessageDetail { from, to, subject, date, body, body_html, attachments })
+        let filename = a.attachment_name().unwrap_or("attachment").to_string();
+        let content_type = mime_guess::from_path(&filename)
+            .first_or_octet_stream()
+            .to_string();
+        attachments.push(AttachmentInfo { filename, size: a.contents().len(), content_type });
+    }
+
+    Ok(MessageDetail { from, to, cc, subject, date, body, body_html: html_body, attachments })
 }
 
 pub fn get_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<MessageDetail, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         let fetches = session
             .uid_fetch(uid.to_string(), "BODY[]")
             .map_err(|e| e.to_string())?;
@@ -225,8 +300,7 @@ pub fn get_message(cache: &SessionCache, account: &Account, password: &str, fold
 
 pub fn mark_read(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
             .map_err(|e| e.to_string())?;
@@ -246,8 +320,7 @@ fn move_message(
     dest_mailbox: &str,
 ) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         session.uid_copy(uid.to_string(), dest_mailbox).map_err(|e| e.to_string())?;
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
@@ -277,8 +350,7 @@ pub fn restore_message(cache: &SessionCache, account: &Account, password: &str, 
 /// first. Unlike `move_message`, this is not recoverable.
 pub fn permanently_delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .map_err(|e| e.to_string())?;
@@ -298,8 +370,7 @@ pub fn save_attachment(
 ) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
     let dest_path = dest_path.to_string();
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         let fetches = session
             .uid_fetch(uid.to_string(), "BODY[]")
             .map_err(|e| e.to_string())?;
@@ -325,8 +396,7 @@ pub fn get_attachment_data(
     filename: &str,
 ) -> Result<String, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, |session| {
-        session.select(&mailbox_name).map_err(|e| e.to_string())?;
+    with_connected(cache, account, password, &mailbox_name, |session| {
         let fetches = session
             .uid_fetch(uid.to_string(), "BODY[]")
             .map_err(|e| e.to_string())?;
@@ -343,9 +413,22 @@ pub fn get_attachment_data(
     })
 }
 
+/// Parses a comma-separated list of addresses (as typed into the Cc/Bcc
+/// fields) into mailboxes, skipping blank entries so an empty or
+/// trailing-comma field just yields no recipients rather than an error.
+fn parse_addresses(input: &str) -> Result<Vec<Mailbox>, String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<Mailbox>().map_err(|e| e.to_string()))
+        .collect()
+}
+
 fn build_message(
     account: &Account,
     to: &str,
+    cc: &str,
     subject: &str,
     body: &str,
     attachment_paths: &[String],
@@ -366,12 +449,16 @@ fn build_message(
         multipart = multipart.singlepart(Attachment::new(filename).body(bytes, content_type));
     }
 
-    let message = Message::builder()
+    let mut builder = Message::builder()
         .from(account.username.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
         .to(to.parse().map_err(|e: lettre::address::AddressError| e.to_string())?)
-        .subject(subject)
-        .multipart(multipart)
-        .map_err(|e| e.to_string())?;
+        .subject(subject);
+    // Cc, unlike Bcc, is a real header — every recipient is meant to see it.
+    for mbox in parse_addresses(cc)? {
+        builder = builder.cc(mbox);
+    }
+
+    let message = builder.multipart(multipart).map_err(|e| e.to_string())?;
 
     Ok(message.formatted())
 }
@@ -381,11 +468,13 @@ pub fn send_email(
     account: &Account,
     password: &str,
     to: &str,
+    cc: &str,
+    bcc: &str,
     subject: &str,
     body: &str,
     attachment_paths: &[String],
 ) -> Result<(), String> {
-    let raw = build_message(account, to, subject, body, attachment_paths)?;
+    let raw = build_message(account, to, cc, subject, body, attachment_paths)?;
 
     let creds = Credentials::new(account.username.clone(), password.to_string());
     let transport = SmtpTransport::relay(&account.smtp_host)
@@ -394,10 +483,19 @@ pub fn send_email(
         .credentials(creds)
         .build();
 
+    // The envelope's recipient list is what actually determines delivery
+    // (SMTP RCPT TO), separately from the To/Cc headers baked into the raw
+    // message above. Bcc recipients go only here — never into a header —
+    // since a Bcc header in the raw bytes would leak them to everyone else
+    // who received the mail.
+    let mut recipients = vec![to.parse().map_err(|e: lettre::address::AddressError| e.to_string())?];
+    recipients.extend(parse_addresses(cc)?.into_iter().map(|m| m.email));
+    recipients.extend(parse_addresses(bcc)?.into_iter().map(|m| m.email));
+
     transport.send_raw(
         &lettre::address::Envelope::new(
             Some(account.username.parse().map_err(|e: lettre::address::AddressError| e.to_string())?),
-            vec![to.parse().map_err(|e: lettre::address::AddressError| e.to_string())?],
+            recipients,
         )
         .map_err(|e| e.to_string())?,
         &raw,
@@ -406,7 +504,7 @@ pub fn send_email(
 
     // Best-effort copy into Sent — many custom IMAP servers don't auto-populate it.
     // ponytail: no dedup against providers that DO auto-copy; harmless duplicate in that case, fine for v1.
-    let _ = with_connected(cache, account, password, |session| {
+    let _ = with_session(cache, account, password, |session| {
         session.append(&account.sent_folder, &raw).map_err(|e| e.to_string())
     });
 
@@ -418,12 +516,13 @@ pub fn save_draft(
     account: &Account,
     password: &str,
     to: &str,
+    cc: &str,
     subject: &str,
     body: &str,
     attachment_paths: &[String],
 ) -> Result<(), String> {
-    let raw = build_message(account, to, subject, body, attachment_paths)?;
-    with_connected(cache, account, password, |session| {
+    let raw = build_message(account, to, cc, subject, body, attachment_paths)?;
+    with_session(cache, account, password, |session| {
         session.append(&account.drafts_folder, &raw).map_err(|e| e.to_string())
     })
 }
@@ -549,6 +648,21 @@ mod tests {
         // ever None when the message has no readable body part at all.
         assert!(detail.body_html.is_some());
         assert!(detail.attachments.is_empty());
+        assert_eq!(detail.cc, "");
+    }
+
+    #[test]
+    fn parse_message_detail_extracts_multiple_cc_addresses() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Cc: carol@example.com, dave@example.com\r\n\
+                    Subject: With Cc\r\n\
+                    Content-Type: text/plain; charset=utf-8\r\n\
+                    \r\n\
+                    Body\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert_eq!(detail.cc, "carol@example.com, dave@example.com");
     }
 
     #[test]
@@ -608,14 +722,66 @@ mod tests {
     }
 
     #[test]
+    fn cid_referenced_image_is_inlined_not_listed_as_attachment() {
+        let raw = "From: alice@example.com\r\n\
+                    To: bob@example.com\r\n\
+                    Subject: With Logo\r\n\
+                    MIME-Version: 1.0\r\n\
+                    Content-Type: multipart/related; boundary=\"BOUNDARY\"\r\n\
+                    \r\n\
+                    --BOUNDARY\r\n\
+                    Content-Type: text/html; charset=utf-8\r\n\
+                    \r\n\
+                    <p>Hi</p><img src=\"cid:logo123\">\r\n\
+                    --BOUNDARY\r\n\
+                    Content-Type: image/png\r\n\
+                    Content-Disposition: inline; filename=\"logo.png\"\r\n\
+                    Content-ID: <logo123>\r\n\
+                    Content-Transfer-Encoding: base64\r\n\
+                    \r\n\
+                    aGVsbG8=\r\n\
+                    --BOUNDARY--\r\n";
+
+        let detail = parse_message_detail(raw.as_bytes()).unwrap();
+        assert!(detail.attachments.is_empty());
+        let html = detail.body_html.expect("html body should be present");
+        assert!(!html.contains("cid:logo123"));
+        assert!(html.contains("data:image/png;base64,"));
+    }
+
+    #[test]
     fn build_message_includes_headers_and_body() {
         let account = test_account();
-        let raw = build_message(&account, "dest@example.com", "Test Subject", "Test body content", &[]).unwrap();
+        let raw = build_message(&account, "dest@example.com", "", "Test Subject", "Test body content", &[]).unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
         assert!(raw_str.contains("Test Subject"));
         assert!(raw_str.contains("dest@example.com"));
         assert!(raw_str.contains(&account.username));
         assert!(raw_str.contains("Test body content"));
+    }
+
+    #[test]
+    fn build_message_includes_cc_header_for_each_address() {
+        let account = test_account();
+        let raw = build_message(
+            &account,
+            "dest@example.com",
+            "cc1@example.com, cc2@example.com",
+            "Subject",
+            "Body",
+            &[],
+        )
+        .unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(raw_str.contains("Cc: cc1@example.com, cc2@example.com"));
+    }
+
+    #[test]
+    fn build_message_ignores_blank_cc_field() {
+        let account = test_account();
+        let raw = build_message(&account, "dest@example.com", "  , ", "Subject", "Body", &[]).unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(!raw_str.contains("Cc:"));
     }
 
     #[test]
@@ -628,6 +794,7 @@ mod tests {
         let raw = build_message(
             &account,
             "dest@example.com",
+            "",
             "Subject",
             "Body",
             &[path.to_string_lossy().to_string()],
@@ -647,6 +814,7 @@ mod tests {
         let result = build_message(
             &account,
             "dest@example.com",
+            "",
             "Subject",
             "Body",
             &["/nonexistent/tinymail-test-path/file.txt".to_string()],

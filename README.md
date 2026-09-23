@@ -2,6 +2,10 @@
 
 tinymail - lightweight email client
 
+tinymail is a small native desktop client for reading and sending email over IMAP and SMTP. It shows a single inbox alongside sent, drafts, archive, and trash, supports reading, composing, replying, forwarding, and attachments, and switches between light and dark themes.
+
+The app connects to any IMAP and SMTP account through a local config file. There are no accounts or servers of its own, and no data leaves the machine except to talk directly to the mail server.
+
 Update and add this yaml to `$HOME/tinymail.yml`
 ```yml
 imap_host: IMAP_HOST
@@ -11,4 +15,12 @@ smtp_port: 465
 username: email
 sent_folder: Sent
 drafts_folder: Drafts
+archive_folder: Archive
+trash_folder: Trash
 ```
+
+<img width="800" alt="tinymail inbox" src="assets/inbox.png" />
+
+<img width="800" alt="tinymail message view" src="assets/message-view.png" />
+
+<img width="800" alt="tinymail compose" src="assets/compose.png" />

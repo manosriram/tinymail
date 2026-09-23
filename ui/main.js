@@ -24,6 +24,11 @@ function applyTheme() {
 function toggleTheme() {
   localStorage.setItem(THEME_KEY, isDarkActive() ? "light" : "dark");
   applyTheme();
+  // The open message's HTML body lives in a sandboxed iframe with its own
+  // document, so it doesn't pick up the new theme via CSS — re-render it.
+  if (currentMessage?.body_html) {
+    renderHtmlBody(document.getElementById("message-body-frame"), currentMessage.body_html);
+  }
 }
 
 document.querySelectorAll(".theme-toggle").forEach((btn) => btn.addEventListener("click", toggleTheme));
@@ -46,6 +51,7 @@ let currentMessage = null; // { folder, uid, from, subject, body }
 let currentAccountUsername = null; // set once we know which account is active; scopes the persisted message cache
 let attachmentPaths = [];
 const folderCache = {}; // folder -> messages[], avoids refetching on every nav click
+const messageDetailCache = {}; // "folder:uid" -> last-fetched MessageDetail, so reopening a message already viewed this session is instant
 
 const FOLDER_TITLES = { INBOX: "Inbox", SENT: "Sent", DRAFTS: "Drafts", ARCHIVE: "Archive", TRASH: "Trash" };
 
@@ -114,6 +120,7 @@ function openFolder(folder) {
 
 function showApp(username) {
   currentAccountUsername = username;
+  document.querySelector(".app-title").textContent = `tinymail (${username})`;
   setupView.classList.add("hidden");
   appView.classList.remove("hidden");
   openFolder(currentFolder).then(() => {
@@ -128,7 +135,12 @@ function showApp(username) {
 // already fully rendered.
 async function showWindow() {
   try {
-    await window.__TAURI__.window.getCurrentWindow().show();
+    const win = window.__TAURI__.window.getCurrentWindow();
+    await win.show();
+    // show() alone can leave the window visible but behind other apps
+    // (notably on macOS, where it doesn't imply activation) — focus it so it
+    // actually comes to the front instead of needing a manual click to raise.
+    await win.setFocus();
   } catch (err) {
     console.error(err);
   }
@@ -317,93 +329,124 @@ function moveCurrentMessage(command, destFolder, { inProgress = "Working...", do
 }
 
 async function showMessage(folder, uid) {
+  const cacheKey = `${folder}:${uid}`;
+  const cached = messageDetailCache[cacheKey];
+  if (cached) {
+    // Instant: render what we already fetched this session, then quietly
+    // refresh from the server in case it changed (e.g. read elsewhere) —
+    // without re-showing "Loading..." over the content that's already there.
+    renderMessage(folder, uid, cached);
+    markMessageRead(folder, uid);
+    invoke("get_message", { folder, uid })
+      .then((msg) => {
+        messageDetailCache[cacheKey] = msg;
+        if (currentMessage?.folder === folder && currentMessage?.uid === uid) renderMessage(folder, uid, msg);
+      })
+      .catch((err) => console.error(err));
+    return;
+  }
+
   messageDetail.innerHTML = "<p class='placeholder'>Loading...</p>";
   try {
+    // get_message runs alone first — IMAP only allows one command in flight
+    // per connection, so firing mark_read concurrently just makes them fight
+    // over the same session lock. Whichever loses (often this fetch, the one
+    // thing the user is actually waiting on) gets stuck behind the other's
+    // full round trip, including a cold reconnect if the session went idle.
+    // mark_read runs after, once the content is already on screen.
     const msg = await invoke("get_message", { folder, uid });
-    currentMessage = { folder, uid, from: msg.from, to: msg.to, date: msg.date, subject: msg.subject, body: msg.body };
-    const bodyHtml = msg.body_html
-      ? `<iframe id="message-body-frame" sandbox="allow-same-origin" title="Message body"></iframe>`
-      : `<div class="body">${formatBody(msg.body)}</div>`;
-    const attachmentsHtml = msg.attachments
-      .map(
-        (a) =>
-          `<li class="attachment-item" data-filename="${escapeHtml(a.filename)}" data-content-type="${escapeHtml(a.content_type)}" title="${escapeHtml(a.filename)} (${a.size} bytes)">
-            <span class="attachment-preview">${isImageType(a.content_type) ? "" : attachmentIcon(a.filename)}</span>
-            <button data-filename="${escapeHtml(a.filename)}">Save</button>
-          </li>`
-      )
-      .join("");
-    messageDetail.innerHTML = `
-      <h2>${escapeHtml(msg.subject)}</h2>
-      <p><strong>From:</strong> ${escapeHtml(msg.from)}</p>
-      <p><strong>To:</strong> ${escapeHtml(msg.to)}</p>
-      <p><strong>Date:</strong> ${escapeHtml(formatLocalDate(msg.date))}</p>
-      <div class="message-toolbar">
-        <button id="reply-btn">Reply</button>
-        <button id="forward-btn">Forward</button>
-        ${
-          folder === "ARCHIVE"
-            ? `<button id="unarchive-btn">Unarchive</button>`
-            : folder === "TRASH"
-              ? `<button id="restore-btn">Restore</button>`
-              : `<button id="archive-btn">Archive</button>`
-        }
-        ${folder !== "TRASH" ? `<button id="delete-btn">Delete</button>` : `<button id="delete-forever-btn">Delete Forever</button>`}
-      </div>
-      <hr/>
-      ${bodyHtml}
-      ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
-    `;
-    document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
-    document.getElementById("forward-btn").addEventListener("click", () => openCompose(forwardPrefill(currentMessage)));
-    document.getElementById("archive-btn")?.addEventListener("click", () =>
-      moveCurrentMessage("archive_message", "ARCHIVE", { inProgress: "Archiving...", done: "Archived" })
-    );
-    document.getElementById("unarchive-btn")?.addEventListener("click", () =>
-      confirmAndMove("Unarchive this message?", "unarchive_message", "INBOX", { inProgress: "Unarchiving...", done: "Unarchived" })
-    );
-    document.getElementById("restore-btn")?.addEventListener("click", () =>
-      confirmAndMove("Restore this message to Inbox?", "restore_message", "INBOX", { inProgress: "Restoring...", done: "Restored" })
-    );
-    document.getElementById("delete-forever-btn")?.addEventListener("click", () =>
-      confirmAndMove("Permanently delete this message? This cannot be undone.", "permanently_delete_message", null, {
-        inProgress: "Deleting...",
-        done: "Deleted",
-      })
-    );
-    document.getElementById("delete-btn")?.addEventListener("click", () =>
-      confirmAndMove("Delete this message?", "delete_message", "TRASH", { inProgress: "Deleting...", done: "Deleted" })
-    );
+    messageDetailCache[cacheKey] = msg;
+    renderMessage(folder, uid, msg);
     markMessageRead(folder, uid);
-    if (msg.body_html) renderHtmlBody(document.getElementById("message-body-frame"), msg.body_html);
-    messageDetail.querySelectorAll("li.attachment-item").forEach((li) => {
-      const filename = li.dataset.filename;
-      const contentType = li.dataset.contentType;
-      if (!isImageType(contentType)) return;
-      invoke("get_attachment_data", { folder, uid, filename })
-        .then((base64) => {
-          const img = document.createElement("img");
-          img.className = "attachment-thumb";
-          img.src = `data:${contentType};base64,${base64}`;
-          li.querySelector(".attachment-preview").replaceChildren(img);
-        })
-        .catch((err) => console.error(err));
-    });
-    messageDetail.querySelectorAll("button[data-filename]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const filename = btn.dataset.filename;
-        const dest = await save_file_dialog(filename);
-        if (!dest) return;
-        try {
-          await invoke("save_attachment", { folder, uid, filename, destPath: dest });
-        } catch (err) {
-          alert(String(err));
-        }
-      });
-    });
   } catch (err) {
     messageDetail.innerHTML = `<p class="error">${escapeHtml(String(err))}</p>`;
   }
+}
+
+function renderMessage(folder, uid, msg) {
+  currentMessage = { folder, uid, from: msg.from, to: msg.to, cc: msg.cc, date: msg.date, subject: msg.subject, body: msg.body, body_html: msg.body_html };
+  const bodyHtml = msg.body_html
+    ? `<iframe id="message-body-frame" sandbox="allow-same-origin" title="Message body"></iframe>`
+    : `<div class="body">${formatBody(msg.body)}</div>`;
+  const attachmentsHtml = msg.attachments
+    .map(
+      (a) =>
+        `<li class="attachment-item" data-filename="${escapeHtml(a.filename)}" data-content-type="${escapeHtml(a.content_type)}" title="${escapeHtml(a.filename)} (${a.size} bytes)">
+          <span class="attachment-preview">${isImageType(a.content_type) ? "" : attachmentIcon(a.filename)}</span>
+          <button data-filename="${escapeHtml(a.filename)}">Save</button>
+        </li>`
+    )
+    .join("");
+  messageDetail.innerHTML = `
+    <h2>${escapeHtml(msg.subject)}</h2>
+    <p><strong>From:</strong> ${escapeHtml(msg.from)}</p>
+    <p><strong>To:</strong> ${escapeHtml(msg.to)}</p>
+    ${msg.cc ? `<p><strong>Cc:</strong> ${escapeHtml(msg.cc)}</p>` : ""}
+    <p><strong>Date:</strong> ${escapeHtml(formatLocalDate(msg.date))}</p>
+    <div class="message-toolbar">
+      <button id="reply-btn">Reply</button>
+      <button id="forward-btn">Forward</button>
+      ${folder === "DRAFTS" ? `<button id="send-draft-btn">Send</button>` : ""}
+      ${
+        folder === "ARCHIVE"
+          ? `<button id="unarchive-btn">Unarchive</button>`
+          : folder === "TRASH"
+            ? `<button id="restore-btn">Restore</button>`
+            : `<button id="archive-btn">Archive</button>`
+      }
+      ${folder !== "TRASH" ? `<button id="delete-btn">Delete</button>` : `<button id="delete-forever-btn">Delete Forever</button>`}
+    </div>
+    <hr/>
+    ${bodyHtml}
+    ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
+  `;
+  document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
+  document.getElementById("forward-btn").addEventListener("click", () => openCompose(forwardPrefill(currentMessage)));
+  document.getElementById("send-draft-btn")?.addEventListener("click", () => openCompose(draftPrefill(currentMessage), uid));
+  document.getElementById("archive-btn")?.addEventListener("click", () =>
+    moveCurrentMessage("archive_message", "ARCHIVE", { inProgress: "Archiving...", done: "Archived" })
+  );
+  document.getElementById("unarchive-btn")?.addEventListener("click", () =>
+    confirmAndMove("Unarchive this message?", "unarchive_message", "INBOX", { inProgress: "Unarchiving...", done: "Unarchived" })
+  );
+  document.getElementById("restore-btn")?.addEventListener("click", () =>
+    confirmAndMove("Restore this message to Inbox?", "restore_message", "INBOX", { inProgress: "Restoring...", done: "Restored" })
+  );
+  document.getElementById("delete-forever-btn")?.addEventListener("click", () =>
+    confirmAndMove("Permanently delete this message? This cannot be undone.", "permanently_delete_message", null, {
+      inProgress: "Deleting...",
+      done: "Deleted",
+    })
+  );
+  document.getElementById("delete-btn")?.addEventListener("click", () =>
+    confirmAndMove("Delete this message?", "delete_message", "TRASH", { inProgress: "Deleting...", done: "Deleted" })
+  );
+  if (msg.body_html) renderHtmlBody(document.getElementById("message-body-frame"), msg.body_html);
+  messageDetail.querySelectorAll("li.attachment-item").forEach((li) => {
+    const filename = li.dataset.filename;
+    const contentType = li.dataset.contentType;
+    if (!isImageType(contentType)) return;
+    invoke("get_attachment_data", { folder, uid, filename })
+      .then((base64) => {
+        const img = document.createElement("img");
+        img.className = "attachment-thumb";
+        img.src = `data:${contentType};base64,${base64}`;
+        li.querySelector(".attachment-preview").replaceChildren(img);
+      })
+      .catch((err) => console.error(err));
+  });
+  messageDetail.querySelectorAll("button[data-filename]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const filename = btn.dataset.filename;
+      const dest = await save_file_dialog(filename);
+      if (!dest) return;
+      try {
+        await invoke("save_attachment", { folder, uid, filename, destPath: dest });
+      } catch (err) {
+        alert(String(err));
+      }
+    });
+  });
 }
 
 function replyPrefill(msg) {
@@ -426,6 +469,15 @@ function forwardPrefill(msg) {
     to: "",
     subject,
     body: `\n\n${header}\n\n${msg.body}`,
+  };
+}
+
+function draftPrefill(msg) {
+  return {
+    to: msg.to,
+    cc: msg.cc,
+    subject: msg.subject,
+    body: msg.body,
   };
 }
 
@@ -498,11 +550,18 @@ const composeModal = document.getElementById("compose-modal");
 const composeForm = document.getElementById("compose-form");
 const attachmentListEl = document.getElementById("attachment-list");
 
-function openCompose(prefill = {}) {
+// Set while editing an existing draft (via the Send button on a DRAFTS
+// message) so submitCompose knows to remove the superseded draft afterward
+// instead of leaving a stale duplicate behind. null for a plain new message.
+let editingDraftUid = null;
+
+function openCompose(prefill = {}, draftUid = null) {
+  editingDraftUid = draftUid;
   attachmentPaths = [];
   attachmentListEl.innerHTML = "";
   composeForm.reset();
   if (prefill.to) composeForm.elements.to.value = prefill.to;
+  if (prefill.cc) composeForm.elements.cc.value = prefill.cc;
   if (prefill.subject) composeForm.elements.subject.value = prefill.subject;
   if (prefill.body) composeForm.elements.body.value = prefill.body;
   composeModal.classList.remove("hidden");
@@ -556,10 +615,17 @@ function submitCompose(shouldSend) {
   const form = new FormData(composeForm);
   const payload = {
     to: form.get("to"),
+    cc: form.get("cc") || "",
     subject: form.get("subject") || "",
     body: form.get("body") || "",
     attachmentPaths: [...attachmentPaths],
   };
+  // Bcc only ever goes to send_email — save_draft has nowhere safe to persist
+  // it (a draft has no envelope, and writing it into a header would defeat
+  // the point of Bcc once the draft is later sent or read back).
+  if (shouldSend) payload.bcc = form.get("bcc") || "";
+  const supersededDraftUid = editingDraftUid;
+  editingDraftUid = null;
   composeModal.classList.add("hidden");
   const inProgress = shouldSend ? "Sending..." : "Saving draft...";
   const done = shouldSend ? "Sent" : "Draft saved";
@@ -568,6 +634,13 @@ function submitCompose(shouldSend) {
     .then(() => {
       showToast(done, { autoHideMs: 2000 });
       invalidateFolder(shouldSend ? "SENT" : "DRAFTS");
+      // A fresh draft/sent message was just appended above — remove the one
+      // this replaced instead of leaving a stale duplicate sitting in Drafts.
+      if (supersededDraftUid != null) {
+        invoke("permanently_delete_message", { folder: "DRAFTS", uid: supersededDraftUid })
+          .then(() => invalidateFolder("DRAFTS"))
+          .catch((err) => console.error(err));
+      }
     })
     .catch((err) => showToast(`Failed: ${err}`, { autoHideMs: 4000 }));
 }
@@ -602,10 +675,11 @@ function escapeHtml(str) {
 // allow-same-origin only lets this parent frame read the iframe's DOM to size
 // it and intercept link clicks — safe to combine with no-scripts.
 function renderHtmlBody(iframe, html) {
+  const [bg, color] = isDarkActive() ? ["#1c1c1f", "#ecebee"] : ["#ffffff", "#1a1a1e"];
   const wrapped = `<!doctype html><html><head><base target="_blank"><meta charset="utf-8">
     <style>
       html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; }
-      body { margin: 0; font-family: inherit; color: #fff; background: #1c1c1f; word-wrap: break-word; }
+      body { margin: 0; font-family: inherit; color: ${color}; background: ${bg}; word-wrap: break-word; }
       /* Marketing emails often size their outer wrapper for a fixed preview pane
          (height/max-height + overflow:hidden); left alone that clips the real
          content to a sliver of the message. Force any direct child of body to

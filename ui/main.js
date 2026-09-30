@@ -120,7 +120,9 @@ function openFolder(folder) {
 
 function showApp(username) {
   currentAccountUsername = username;
-  document.querySelector(".app-title").textContent = `tinymail (${username})`;
+  window.__TAURI__.app.getVersion().then((version) => {
+    document.querySelector(".app-title").textContent = `tinymail (${version})`;
+  });
   setupView.classList.add("hidden");
   appView.classList.remove("hidden");
   openFolder(currentFolder).then(() => {

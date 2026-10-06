@@ -1,0 +1,59 @@
+/* Prototype 3 — "Graphite Sidebar"
+   Classic three-pane layout: folders in a left sidebar, compact list, roomy
+   reading pane. Monochrome graphite accent; color is reserved for avatars. */
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f5f5f6;
+  --bg-raised: #ffffff;
+  --bg-hover: #efeff1;
+  --bg-selected: #ececee;
+  --border: #e4e4e7;
+  --text: #18181b;
+  --text-muted: #52525b;
+  --text-faint: #71717a;
+  --accent: #27272a;
+  --accent-ink: #ffffff;
+  --accent-fg: #18181b;
+}
+:root[data-theme="dark"] {
+  --bg: #121214;
+  --bg-subtle: #18181b;
+  --bg-raised: #1c1c1f;
+  --bg-hover: #232326;
+  --bg-selected: #27272b;
+  --border: #2a2a2e;
+  --text: #ececee;
+  --text-muted: #a8a8b0;
+  --text-faint: #8a8a93;
+  --accent: #e4e4e7;
+  --accent-ink: #18181b;
+  --accent-fg: #f4f4f5;
+}
+
+#app-view {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "top top" "nav body";
+}
+.topbar { grid-area: top; }
+.folder-tabs {
+  grid-area: nav; display: flex; flex-direction: column; align-items: stretch;
+  height: auto; padding: 0.75rem 0.6rem; border-bottom: none; border-right: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.folder-tabs > span:first-child { display: none; }
+.folder-tabs .tabs { flex-direction: column; height: auto; gap: 2px; }
+.folder-btn {
+  height: 34px; padding: 0 0.7rem; justify-content: space-between; border: none; margin: 0;
+  border-radius: 6px; font-size: 13.5px; color: var(--text-muted);
+}
+.folder-btn:hover { background: var(--bg-hover); }
+.folder-btn.active { background: var(--bg-selected); color: var(--text); font-weight: 600; border: none; }
+.folder-tabs #refresh-btn { justify-self: auto; align-self: flex-start; margin-top: auto; }
+.app-body { grid-area: body; grid-template-columns: minmax(300px, 380px) 1fr; }
+.unread-badge { background: var(--accent); color: var(--accent-ink); }
+
+.message-item { padding: 0.6rem 1rem 0.6rem 0.8rem; }
+.message-item.active { border-left-color: var(--accent); }
+.message-item.unread .date { color: var(--text); }

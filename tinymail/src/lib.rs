@@ -103,6 +103,17 @@ async fn get_message(account: String, folder: String, uid: u32, state: State<'_,
     .await
 }
 
+/// Warms the backend body cache for messages the user is likely to open next.
+#[tauri::command]
+async fn prefetch_messages(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let state = state.inner().clone();
+    blocking(move || {
+        let (cache, acct, pw) = state.resolve(&account)?;
+        mail::prefetch_messages(&cache, &acct, &pw, &folder, &uids)
+    })
+    .await
+}
+
 #[tauri::command]
 async fn mark_read(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
@@ -225,6 +236,7 @@ pub fn run() {
             remove_account,
             list_messages,
             get_message,
+            prefetch_messages,
             mark_read,
             delete_message,
             archive_message,

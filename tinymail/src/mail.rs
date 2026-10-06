@@ -5,25 +5,87 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 use mail_parser::{MessageParser, MimeHeaders};
 use serde::Serialize;
+use std::collections::{HashMap, VecDeque};
 use std::net::TcpStream;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub type ImapSession = imap::Session<native_tls::TlsStream<TcpStream>>;
 
-/// Caches one authenticated IMAP session per app run so folder navigation only
-/// pays for a SELECT, not a fresh TCP connect + TLS handshake + LOGIN each click.
-/// Also remembers which mailbox is currently SELECTed on that session, so an
-/// action that targets the same folder as the last one (e.g. opening a message
-/// right after listing it) can skip SELECT too — it's a round trip in its own
-/// right, and often the dominant cost of "open a mail" on a slow connection.
+/// One authenticated IMAP session, kept alive across commands so folder
+/// navigation only pays for a SELECT, not a fresh TCP connect + TLS handshake
+/// + LOGIN each click. Also remembers which mailbox is currently SELECTed, so
+/// back-to-back actions on the same folder can skip SELECT's round trip.
+#[derive(Default)]
+struct Conn {
+    session: Option<ImapSession>,
+    selected: String,
+}
+
+/// Raw RFC822 bytes of messages already downloaded, keyed by (mailbox, uid).
+/// IMAP guarantees a UID's content never changes within a UIDVALIDITY, so a
+/// cached message never needs refetching: reopening it, rendering attachment
+/// thumbnails and saving attachments are all served locally.
+#[derive(Default)]
+struct BodyCache {
+    map: HashMap<(String, u32), Arc<Vec<u8>>>,
+    order: VecDeque<(String, u32)>,
+    bytes: usize,
+    uid_validity: HashMap<String, u32>,
+}
+
+const BODY_CACHE_BUDGET: usize = 96 * 1024 * 1024;
+/// Prefetch skips messages bigger than this (usually large attachments) —
+/// they're fetched on demand only, so prefetching can't hog the connection.
+const PREFETCH_MAX_SIZE: u32 = 3 * 1024 * 1024;
+
+impl BodyCache {
+    fn get(&self, mailbox: &str, uid: u32) -> Option<Arc<Vec<u8>>> {
+        self.map.get(&(mailbox.to_string(), uid)).cloned()
+    }
+
+    fn insert(&mut self, mailbox: &str, uid: u32, raw: Vec<u8>) -> Arc<Vec<u8>> {
+        let key = (mailbox.to_string(), uid);
+        if let Some(existing) = self.map.get(&key) {
+            return existing.clone();
+        }
+        let raw = Arc::new(raw);
+        self.bytes += raw.len();
+        self.map.insert(key.clone(), raw.clone());
+        self.order.push_back(key);
+        while self.bytes > BODY_CACHE_BUDGET && self.order.len() > 1 {
+            if let Some(old) = self.order.pop_front() {
+                if let Some(evicted) = self.map.remove(&old) {
+                    self.bytes -= evicted.len();
+                }
+            }
+        }
+        raw
+    }
+
+    /// Drops a mailbox's cached messages if the server reset its UIDs.
+    fn check_uid_validity(&mut self, mailbox: &str, uid_validity: Option<u32>) {
+        let Some(v) = uid_validity else { return };
+        if self.uid_validity.insert(mailbox.to_string(), v).is_some_and(|old| old != v) {
+            self.map.retain(|(m, _), _| m != mailbox);
+            self.order.retain(|(m, _)| m != mailbox);
+            self.bytes = self.map.values().map(|r| r.len()).sum();
+        }
+    }
+}
+
+/// Per-account IMAP state. Two connections, because IMAP allows one command in
+/// flight per connection: `fg` serves whatever the user is waiting on (listing
+/// a folder, opening a message, marking it read, moving it), while `bg` only
+/// prefetches bodies, so speculative downloads never queue in front of a click.
 pub struct SessionCache {
-    session: Mutex<Option<ImapSession>>,
-    selected: Mutex<String>,
+    fg: Mutex<Conn>,
+    bg: Mutex<Conn>,
+    bodies: Mutex<BodyCache>,
 }
 
 impl SessionCache {
     pub fn new() -> Self {
-        Self { session: Mutex::new(None), selected: Mutex::new(String::new()) }
+        Self { fg: Mutex::default(), bg: Mutex::default(), bodies: Mutex::default() }
     }
 }
 
@@ -42,28 +104,27 @@ fn imap_connect(account: &Account, password: &str) -> Result<ImapSession, String
         .map_err(|(e, _)| e.to_string())
 }
 
-/// Runs `f` against a cached, already-authenticated session; reconnects once and
-/// retries if the cached session turned out to be dead (network drop, timeout, etc).
-/// Does not touch mailbox selection — for commands like APPEND that don't need one.
-fn with_session<F, R>(cache: &SessionCache, account: &Account, password: &str, f: F) -> Result<R, String>
+/// Runs `f` against a connection's already-authenticated session (connecting
+/// first if needed); reconnects once and retries if the session turned out to
+/// be dead (network drop, timeout, etc). `f` also gets the connection's
+/// tracked SELECTed mailbox, which a fresh session always starts without.
+fn with_session<F, R>(conn: &Mutex<Conn>, account: &Account, password: &str, f: F) -> Result<R, String>
 where
-    F: Fn(&mut ImapSession) -> Result<R, String>,
+    F: Fn(&mut ImapSession, &mut String) -> Result<R, String>,
 {
-    let mut guard = cache.session.lock().map_err(|_| "session lock poisoned".to_string())?;
-    if guard.is_none() {
-        *guard = Some(imap_connect(account, password)?);
-        *cache.selected.lock().unwrap() = String::new();
+    let mut guard = conn.lock().map_err(|_| "session lock poisoned".to_string())?;
+    let conn = &mut *guard;
+    if conn.session.is_none() {
+        conn.session = Some(imap_connect(account, password)?);
+        conn.selected.clear();
     }
-    match f(guard.as_mut().unwrap()) {
+    match f(conn.session.as_mut().unwrap(), &mut conn.selected) {
         Ok(v) => Ok(v),
         Err(_) => {
+            conn.selected.clear();
             let mut fresh = imap_connect(account, password)?;
-            // A reconnected session has nothing SELECTed yet — clear the tracked
-            // mailbox before the retry so with_connected's skip-check below can't
-            // mistake a stale value for "already selected on this session".
-            *cache.selected.lock().unwrap() = String::new();
-            let retry = f(&mut fresh);
-            *guard = Some(fresh);
+            let retry = f(&mut fresh, &mut conn.selected);
+            conn.session = Some(fresh);
             retry
         }
     }
@@ -72,19 +133,70 @@ where
 /// Same as `with_session`, but first SELECTs `mailbox` — skipped when the session
 /// already has that mailbox selected, saving a round trip on back-to-back actions
 /// against the same folder (list → open, open → archive, ...).
-fn with_connected<F, R>(cache: &SessionCache, account: &Account, password: &str, mailbox: &str, f: F) -> Result<R, String>
+fn with_connected<F, R>(conn: &Mutex<Conn>, account: &Account, password: &str, mailbox: &str, f: F) -> Result<R, String>
 where
     F: Fn(&mut ImapSession) -> Result<R, String>,
 {
-    with_session(cache, account, password, |session| {
-        let mut selected = cache.selected.lock().map_err(|_| "session lock poisoned".to_string())?;
+    with_session(conn, account, password, |session, selected| {
         if selected.as_str() != mailbox {
             session.select(mailbox).map_err(|e| e.to_string())?;
             *selected = mailbox.to_string();
         }
-        drop(selected);
         f(session)
     })
+}
+
+/// Raw bytes of one message: from the body cache when already downloaded,
+/// otherwise fetched on the foreground connection (BODY.PEEK, so fetching
+/// alone never flips \Seen — `mark_read` does that explicitly).
+fn raw_message(cache: &SessionCache, account: &Account, password: &str, mailbox: &str, uid: u32) -> Result<Arc<Vec<u8>>, String> {
+    if let Some(raw) = cache.bodies.lock().unwrap().get(mailbox, uid) {
+        return Ok(raw);
+    }
+    let raw = with_connected(&cache.fg, account, password, mailbox, |session| {
+        let fetches = session
+            .uid_fetch(uid.to_string(), "BODY.PEEK[]")
+            .map_err(|e| e.to_string())?;
+        let fetch = fetches.iter().find(|f| f.uid == Some(uid)).or(fetches.first()).ok_or("message not found")?;
+        Ok(fetch.body().ok_or("empty message body")?.to_vec())
+    })?;
+    Ok(cache.bodies.lock().unwrap().insert(mailbox, uid, raw))
+}
+
+/// Downloads the given messages into the body cache on the background
+/// connection, in one round trip for sizes and one for bodies. Skips messages
+/// already cached and oversized ones, so it's cheap to call speculatively.
+pub fn prefetch_messages(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    let mailbox_name = resolve_folder(account, folder);
+    let missing: Vec<String> = {
+        let bodies = cache.bodies.lock().unwrap();
+        uids.iter().filter(|&&uid| bodies.get(&mailbox_name, uid).is_none()).map(u32::to_string).collect()
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let fetched = with_connected(&cache.bg, account, password, &mailbox_name, |session| {
+        let sizes = session
+            .uid_fetch(missing.join(","), "(UID RFC822.SIZE)")
+            .map_err(|e| e.to_string())?;
+        let wanted: Vec<String> = sizes
+            .iter()
+            .filter(|f| f.size.is_some_and(|s| s <= PREFETCH_MAX_SIZE))
+            .filter_map(|f| f.uid.map(|u| u.to_string()))
+            .collect();
+        if wanted.is_empty() {
+            return Ok(vec![]);
+        }
+        let fetches = session
+            .uid_fetch(wanted.join(","), "(UID BODY.PEEK[])")
+            .map_err(|e| e.to_string())?;
+        Ok(fetches.iter().filter_map(|f| Some((f.uid?, f.body()?.to_vec()))).collect::<Vec<_>>())
+    })?;
+    let mut bodies = cache.bodies.lock().unwrap();
+    for (uid, raw) in fetched {
+        bodies.insert(&mailbox_name, uid, raw);
+    }
+    Ok(())
 }
 
 fn resolve_folder(account: &Account, folder: &str) -> String {
@@ -171,9 +283,10 @@ pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, fo
     let mailbox_name = resolve_folder(account, folder);
     // Always a real SELECT (never the skip-if-same-mailbox path): the whole point
     // is to learn the current message count, which a stale SELECT can't tell us.
-    with_session(cache, account, password, |session| {
+    with_session(&cache.fg, account, password, |session, selected| {
         let mailbox = session.select(&mailbox_name).map_err(|e| e.to_string())?;
-        *cache.selected.lock().unwrap() = mailbox_name.clone();
+        *selected = mailbox_name.clone();
+        cache.bodies.lock().unwrap().check_uid_validity(&mailbox_name, mailbox.uid_validity);
         if mailbox.exists == 0 {
             return Ok(vec![]);
         }
@@ -295,20 +408,13 @@ fn parse_message_detail(raw: &[u8]) -> Result<MessageDetail, String> {
 }
 
 pub fn get_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<MessageDetail, String> {
-    let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, &mailbox_name, |session| {
-        let fetches = session
-            .uid_fetch(uid.to_string(), "BODY[]")
-            .map_err(|e| e.to_string())?;
-        let fetch = fetches.first().ok_or("message not found")?;
-        let raw = fetch.body().ok_or("empty message body")?;
-        parse_message_detail(raw)
-    })
+    let raw = raw_message(cache, account, password, &resolve_folder(account, folder), uid)?;
+    parse_message_detail(&raw)
 }
 
 pub fn mark_read(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, &mailbox_name, |session| {
+    with_connected(&cache.fg, account, password, &mailbox_name, |session| {
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
             .map_err(|e| e.to_string())?;
@@ -328,7 +434,7 @@ fn move_message(
     dest_mailbox: &str,
 ) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, &mailbox_name, |session| {
+    with_connected(&cache.fg, account, password, &mailbox_name, |session| {
         session.uid_copy(uid.to_string(), dest_mailbox).map_err(|e| e.to_string())?;
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
@@ -358,7 +464,7 @@ pub fn restore_message(cache: &SessionCache, account: &Account, password: &str, 
 /// first. Unlike `move_message`, this is not recoverable.
 pub fn permanently_delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, &mailbox_name, |session| {
+    with_connected(&cache.fg, account, password, &mailbox_name, |session| {
         session
             .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
             .map_err(|e| e.to_string())?;
@@ -377,22 +483,13 @@ pub fn save_attachment(
     dest_path: &str,
 ) -> Result<(), String> {
     let mailbox_name = resolve_folder(account, folder);
-    let dest_path = dest_path.to_string();
-    with_connected(cache, account, password, &mailbox_name, |session| {
-        let fetches = session
-            .uid_fetch(uid.to_string(), "BODY[]")
-            .map_err(|e| e.to_string())?;
-        let fetch = fetches.first().ok_or("message not found")?;
-        let raw = fetch.body().ok_or("empty message body")?;
-        let parsed = MessageParser::default().parse(raw).ok_or("failed to parse message")?;
-
-        let attachment = parsed
-            .attachments()
-            .find(|a| a.attachment_name() == Some(filename))
-            .ok_or("attachment not found")?;
-
-        std::fs::write(&dest_path, attachment.contents()).map_err(|e| e.to_string())
-    })
+    let raw = raw_message(cache, account, password, &mailbox_name, uid)?;
+    let parsed = MessageParser::default().parse(raw.as_slice()).ok_or("failed to parse message")?;
+    let attachment = parsed
+        .attachments()
+        .find(|a| a.attachment_name() == Some(filename))
+        .ok_or("attachment not found")?;
+    std::fs::write(dest_path, attachment.contents()).map_err(|e| e.to_string())
 }
 
 pub fn get_attachment_data(
@@ -404,21 +501,13 @@ pub fn get_attachment_data(
     filename: &str,
 ) -> Result<String, String> {
     let mailbox_name = resolve_folder(account, folder);
-    with_connected(cache, account, password, &mailbox_name, |session| {
-        let fetches = session
-            .uid_fetch(uid.to_string(), "BODY[]")
-            .map_err(|e| e.to_string())?;
-        let fetch = fetches.first().ok_or("message not found")?;
-        let raw = fetch.body().ok_or("empty message body")?;
-        let parsed = MessageParser::default().parse(raw).ok_or("failed to parse message")?;
-
-        let attachment = parsed
-            .attachments()
-            .find(|a| a.attachment_name() == Some(filename))
-            .ok_or("attachment not found")?;
-
-        Ok(base64::engine::general_purpose::STANDARD.encode(attachment.contents()))
-    })
+    let raw = raw_message(cache, account, password, &mailbox_name, uid)?;
+    let parsed = MessageParser::default().parse(raw.as_slice()).ok_or("failed to parse message")?;
+    let attachment = parsed
+        .attachments()
+        .find(|a| a.attachment_name() == Some(filename))
+        .ok_or("attachment not found")?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(attachment.contents()))
 }
 
 /// Parses a comma-separated list of addresses (as typed into the Cc/Bcc
@@ -512,7 +601,7 @@ pub fn send_email(
 
     // Best-effort copy into Sent — many custom IMAP servers don't auto-populate it.
     // ponytail: no dedup against providers that DO auto-copy; harmless duplicate in that case, fine for v1.
-    let _ = with_session(cache, account, password, |session| {
+    let _ = with_session(&cache.fg, account, password, |session, _| {
         session.append(&account.sent_folder, &raw).map_err(|e| e.to_string())
     });
 
@@ -530,7 +619,7 @@ pub fn save_draft(
     attachment_paths: &[String],
 ) -> Result<(), String> {
     let raw = build_message(account, to, cc, subject, body, attachment_paths)?;
-    with_session(cache, account, password, |session| {
+    with_session(&cache.fg, account, password, |session, _| {
         session.append(&account.drafts_folder, &raw).map_err(|e| e.to_string())
     })
 }

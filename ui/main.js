@@ -98,7 +98,7 @@ const knownUnreadUids = {}; // account -> Set of unread INBOX uids; baseline for
 const FOLDERS = ["INBOX", "SENT", "DRAFTS", "ARCHIVE", "TRASH"];
 const ACTIVE_ACCOUNT_KEY = "tinymail-active-account";
 const POLL_INTERVAL_MS = 60000;
-const AVATAR_COLORS = ["#b8f35a", "#a78bfa", "#60a5fa", "#fbbf24", "#f472b6", "#2dd4bf", "#fb923c"];
+const AVATAR_COLORS = ["#5b7aa8", "#5f8a6e", "#9a7a56", "#80699e", "#4f8486", "#a5666b", "#6f7b88"];
 
 const setupView = document.getElementById("setup-view");
 const appView = document.getElementById("app-view");
@@ -466,15 +466,27 @@ function openFolder(folder) {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-// Renders a raw date string (IMAP envelope / RFC3339 header text, in whatever
-// timezone the sender's server stamped it) in the viewer's own local time,
-// as a fixed-width "21 Sep 2026 23:39" for the monospace date columns.
+// Date strings arrive as IMAP envelope / RFC3339 header text, in whatever
+// timezone the sender's server stamped them; both helpers render them in the
+// viewer's local time. The list uses a compact form ("14:05", "21 Sep",
+// "21 Sep 2024"); the reading pane shows the full "21 Sep 2026, 14:05".
+const pad2 = (n) => String(n).padStart(2, "0");
+
 function formatShortDate(raw) {
   if (!raw) return "";
   const d = new Date(raw);
   if (isNaN(d.getTime())) return raw;
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getDate())} ${MONTHS[d.getMonth()]} ${d.getFullYear()}  ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const day = `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return d.getFullYear() === now.getFullYear() ? day : `${day} ${d.getFullYear()}`;
+}
+
+function formatLongDate(raw) {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return raw;
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function formatLocalDate(raw) {
@@ -547,6 +559,7 @@ async function loadFolder(account, folder, { force = false, silent = false } = {
     if (!folderCache[account]) return; // account removed while loading
     folderCache[account][folder] = messages;
     persistFolderCache(account, folder);
+    prefetch(account, folder, messages.slice(0, PREFETCH_TOP).map((m) => m.uid));
     if (folder === "INBOX" && !knownUnreadUids[account]) {
       knownUnreadUids[account] = new Set(messages.filter((m) => m.unread).map((m) => m.uid));
     }
@@ -610,39 +623,64 @@ function moveCurrentMessage(command, destFolder, { inProgress = "Working...", do
 async function showMessage(account, folder, uid) {
   const token = ++openToken;
   const key = `${account}:${folder}:${uid}`;
+  // A UID's content never changes on an IMAP server, so a message fetched
+  // once this session is rendered straight from memory with no round trip.
   const cached = messageDetailCache[key];
   if (cached) {
-    // Instant: render what we already fetched this session, then quietly
-    // refresh from the server in case it changed (e.g. read elsewhere) —
-    // without re-showing "Loading..." over the content that's already there.
     renderMessage(account, folder, uid, cached);
     markMessageRead(account, folder, uid);
-    invoke("get_message", { account, folder, uid })
-      .then((msg) => {
-        messageDetailCache[key] = msg;
-        if (token === openToken && currentMessage?.uid === uid) renderMessage(account, folder, uid, msg);
-      })
-      .catch((err) => console.error(err));
+    prefetchAround(uid);
     return;
   }
 
+  // Paint the header from the list entry right away, so the pane responds
+  // to the click while the body loads (usually from the backend's prefetch
+  // cache, so this is brief).
   currentMessage = null;
-  messageDetail.innerHTML = "<p class='placeholder'>Loading...</p>";
+  const summary = folderCache[account]?.[folder]?.find((m) => m.uid === uid);
+  messageDetail.innerHTML = summary
+    ? `<div class="detail-scroll">
+        <h1 class="detail-subject">${escapeHtml(summary.subject || "(no subject)")}</h1>
+        <div class="detail-meta"><div><div class="from-addr">${escapeHtml(summary.from)}</div></div><div class="meta-date">${escapeHtml(formatLongDate(summary.date))}</div></div>
+        <p class="loading-body">Loading…</p>
+      </div>`
+    : "<p class='placeholder'>Loading…</p>";
+  // Holding J/K fires an open per row; a short pause lets the rows the user
+  // is skipping past drop out before they queue a fetch on the connection.
+  await new Promise((r) => setTimeout(r, 60));
+  if (token !== openToken) return;
   try {
-    // get_message runs alone first — IMAP only allows one command in flight
-    // per connection, so firing mark_read concurrently just makes them fight
-    // over the same session lock. Whichever loses (often this fetch, the one
-    // thing the user is actually waiting on) gets stuck behind the other's
-    // full round trip, including a cold reconnect if the session went idle.
-    // mark_read runs after, once the content is already on screen.
     const msg = await invoke("get_message", { account, folder, uid });
     messageDetailCache[key] = msg;
     if (token !== openToken) return; // user opened something else meanwhile
     renderMessage(account, folder, uid, msg);
+    // mark_read runs after, once the content is already on screen — IMAP
+    // allows one command in flight per connection, so running it alongside
+    // get_message would only delay the fetch the user is waiting on.
     markMessageRead(account, folder, uid);
+    prefetchAround(uid);
   } catch (err) {
     if (token === openToken) messageDetail.innerHTML = `<p class="error placeholder">${escapeHtml(String(err))}</p>`;
   }
+}
+
+// Asks the backend to download the next few messages into its cache (on a
+// separate background IMAP connection), so opening them is instant.
+const PREFETCH_TOP = 12;
+const PREFETCH_AHEAD = 4;
+
+function prefetch(account, folder, uids) {
+  const missing = uids.filter((uid) => !messageDetailCache[`${account}:${folder}:${uid}`]);
+  if (missing.length) invoke("prefetch_messages", { account, folder, uids: missing }).catch((err) => console.error(err));
+}
+
+function prefetchAround(uid) {
+  const messages = folderCache[currentAccount]?.[currentFolder];
+  if (!messages) return;
+  const i = messages.findIndex((m) => m.uid === uid);
+  if (i === -1) return;
+  const near = [...messages.slice(i + 1, i + 1 + PREFETCH_AHEAD), ...messages.slice(Math.max(0, i - 1), i)];
+  prefetch(currentAccount, currentFolder, near.map((m) => m.uid));
 }
 
 function formatSize(bytes) {
@@ -688,7 +726,7 @@ function renderMessage(account, folder, uid, msg) {
           <div class="to-line">to <b>${escapeHtml(msg.to)}</b></div>
           ${msg.cc ? `<div class="to-line">cc <b>${escapeHtml(msg.cc)}</b></div>` : ""}
         </div>
-        <div class="meta-date">${escapeHtml(formatShortDate(msg.date))}</div>
+        <div class="meta-date">${escapeHtml(formatLongDate(msg.date))}</div>
       </div>
       ${bodyHtml}
       ${msg.attachments.length ? `<div class="detail-section-title">${icon("paperclip")}${msg.attachments.length} attachment${msg.attachments.length > 1 ? "s" : ""}</div><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
@@ -789,18 +827,18 @@ async function markMessageRead(account, folder, uid) {
   const cached = folderCache[account]?.[folder]?.find((m) => m.uid === uid);
   if (cached && !cached.unread) return;
 
-  try {
-    await invoke("mark_read", { account, folder, uid });
-  } catch (err) {
-    console.error(err);
-    return;
-  }
+  // Optimistic: the row stops looking unread immediately; the server catches up.
   if (cached) {
     cached.unread = false;
     persistFolderCache(account, folder);
   }
   renderAccountSwitcher();
   if (isViewing(account, folder)) messageList.querySelector(`.message-item[data-uid="${uid}"]`)?.classList.remove("unread");
+  try {
+    await invoke("mark_read", { account, folder, uid });
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 async function checkForNewMail(account) {
@@ -820,9 +858,9 @@ async function checkForNewMail(account) {
   const unread = messages.filter((m) => m.unread);
   const known = knownUnreadUids[account];
   if (known) {
-    for (const m of unread) {
-      if (!known.has(m.uid)) notifyNewMail(account, m);
-    }
+    const fresh = unread.filter((m) => !known.has(m.uid));
+    fresh.forEach((m) => notifyNewMail(account, m));
+    prefetch(account, "INBOX", fresh.slice(0, PREFETCH_TOP).map((m) => m.uid));
   }
   knownUnreadUids[account] = new Set(unread.map((m) => m.uid));
 }
@@ -1039,13 +1077,13 @@ function escapeHtml(str) {
 // it and intercept link clicks — safe to combine with no-scripts.
 function renderHtmlBody(iframe, html) {
   const css = getComputedStyle(document.documentElement);
-  const [bg, color, font, weight] = ["--bg", "--text", "--font-sans", "--font-weight"].map((v) => css.getPropertyValue(v).trim());
+  const [bg, color, font, size] = ["--bg", "--text", "--font-reading", "--reading-size"].map((v) => css.getPropertyValue(v).trim());
   const fontsHref = new URL("fonts/fonts.css", document.baseURI).href;
   const wrapped = `<!doctype html><html><head><base target="_blank"><meta charset="utf-8">
     <link rel="stylesheet" href="${fontsHref}">
     <style>
       html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; }
-      body { margin: 0; font-family: ${font}; font-weight: ${weight}; font-size: 14px; line-height: 1.6; color: ${color}; background: ${bg}; word-wrap: break-word; }
+      body { margin: 0; font-family: ${font}; font-size: ${size}; line-height: 1.6; color: ${color}; background: ${bg}; word-wrap: break-word; }
       /* Marketing emails often size their outer wrapper for a fixed preview pane
          (height/max-height + overflow:hidden); left alone that clips the real
          content to a sliver of the message. Force any direct child of body to

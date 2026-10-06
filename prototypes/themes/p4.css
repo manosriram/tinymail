@@ -1,0 +1,40 @@
+/* Prototype 4 — "Reader"
+   Optimized for reading long mail: Source Serif 4 for subjects and bodies at
+   16.5px in a narrow measure, Inter for the chrome. Warm paper neutrals with
+   a deep navy ink accent. */
+:root {
+  --bg: #fbfaf7;
+  --bg-subtle: #f4f2ed;
+  --bg-raised: #ffffff;
+  --bg-hover: #efece5;
+  --bg-selected: #e9ecf1;
+  --border: #e3dfd6;
+  --text: #1d1c1a;
+  --text-muted: #57534c;
+  --text-faint: #75706a;
+  --accent: #23395d;
+  --accent-ink: #ffffff;
+  --accent-fg: #23395d;
+  --font-reading: "Source Serif 4", Charter, Georgia, serif;
+  --reading-size: 16.5px;
+  --reading-width: 66ch;
+}
+:root[data-theme="dark"] {
+  --bg: #1a1917;
+  --bg-subtle: #201f1c;
+  --bg-raised: #242320;
+  --bg-hover: #2a2926;
+  --bg-selected: #252b35;
+  --border: #33312d;
+  --text: #ebe8e2;
+  --text-muted: #b2ada4;
+  --text-faint: #918c83;
+  --accent: #6f8bb8;
+  --accent-ink: #ffffff;
+  --accent-fg: #a9bddb;
+}
+.detail-scroll { padding: 2.5rem 3rem 3rem; }
+.detail-subject { font-family: var(--font-reading); font-size: 1.75rem; font-weight: 600; letter-spacing: -0.005em; line-height: 1.25; }
+.message-detail .body { line-height: 1.7; }
+.message-item .subject { font-size: 13.5px; }
+.folder-btn.active { color: var(--text); border-bottom-color: var(--accent); }

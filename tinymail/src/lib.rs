@@ -198,6 +198,26 @@ fn open_link(url: String, app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Catches link clicks inside the HTML mail iframe. That iframe is sandboxed
+/// without allow-scripts, so WebKit never runs the click listeners main.js
+/// attaches to it; instead the link navigates the iframe, and this hook cancels
+/// that navigation and hands the URL to the OS opener. The app's own pages
+/// (tauri://localhost, or http://tauri.localhost on Windows) are left alone.
+fn external_links() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("external-links")
+        .on_navigation(|webview, url| {
+            let external = matches!(url.scheme(), "http" | "https" | "mailto") && url.host_str() != Some("tauri.localhost");
+            if !external {
+                return true;
+            }
+            if let Err(e) = open_link(url.to_string(), tauri::Manager::app_handle(webview).clone()) {
+                eprintln!("open link failed: {e}");
+            }
+            false
+        })
+        .build()
+}
+
 #[tauri::command]
 async fn save_attachment(account: String, folder: String, uid: u32, filename: String, dest_path: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
@@ -251,6 +271,7 @@ async fn save_draft(account: String, to: String, cc: String, subject: String, bo
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(external_links())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(AppState::default()))

@@ -1117,12 +1117,15 @@ messageDetail.addEventListener(
 // iframe to keep that styling from leaking into the app UI. No allow-scripts
 // means embedded/inline JS can never execute regardless of sanitization.
 // allow-same-origin only lets this parent frame read the iframe's DOM to size
-// it and intercept link clicks — safe to combine with no-scripts.
+// it — safe to combine with no-scripts. Without allow-scripts WebKit won't run
+// listeners we attach inside the iframe either, so link clicks can't be caught
+// here: links target the iframe itself (<base target="_self">) and the Rust
+// external_links plugin cancels that navigation and opens the URL in the OS.
 function renderHtmlBody(iframe, html) {
   const css = getComputedStyle(document.documentElement);
   const [bg, color, font, size] = ["--bg", "--text", "--font-reading", "--reading-size"].map((v) => css.getPropertyValue(v).trim());
   const fontsHref = new URL("fonts/fonts.css", document.baseURI).href;
-  const wrapped = `<!doctype html><html><head><base target="_blank"><meta charset="utf-8">
+  const wrapped = `<!doctype html><html><head><base target="_self"><meta charset="utf-8">
     <link rel="stylesheet" href="${fontsHref}">
     <style>
       html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; }
@@ -1144,16 +1147,6 @@ function renderHtmlBody(iframe, html) {
     resize();
     new ResizeObserver(resize).observe(doc.documentElement);
     doc.querySelectorAll("img").forEach((img) => img.addEventListener("load", resize));
-    doc.addEventListener(
-      "click",
-      (e) => {
-        const a = e.target.closest?.("a[href]");
-        if (!a) return;
-        e.preventDefault();
-        openExternal(a.getAttribute("href"));
-      },
-      true
-    );
   });
   iframe.srcdoc = wrapped;
 }

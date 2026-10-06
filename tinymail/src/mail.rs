@@ -148,15 +148,23 @@ fn envelope_to_summary(f: &imap::types::Fetch) -> Option<MessageSummary> {
             format!("{}@{}", mailbox, host)
         })
         .unwrap_or_default();
-    let subject = envelope
-        .subject
-        .map(|s| String::from_utf8_lossy(s).to_string())
-        .unwrap_or_default();
+    let subject = envelope.subject.map(decode_subject).unwrap_or_default();
     let date = envelope
         .date
         .map(|d| String::from_utf8_lossy(d).to_string())
         .unwrap_or_default();
     Some(MessageSummary { uid, from, subject, date, unread })
+}
+
+/// The IMAP envelope hands back the Subject header exactly as sent, so
+/// non-ASCII subjects arrive RFC 2047-encoded (`=?utf-8?B?...?=`). Run it
+/// through mail_parser's header decoder, the same one used for full messages.
+fn decode_subject(raw: &[u8]) -> String {
+    let header = [b"Subject: ".as_slice(), raw, b"\r\n\r\n"].concat();
+    MessageParser::default()
+        .parse_headers(header.as_slice())
+        .and_then(|m| m.subject().map(str::to_string))
+        .unwrap_or_else(|| String::from_utf8_lossy(raw).to_string())
 }
 
 pub fn list_messages(cache: &SessionCache, account: &Account, password: &str, folder: &str) -> Result<Vec<MessageSummary>, String> {
@@ -581,6 +589,14 @@ mod tests {
     fn parse_date_timestamp_falls_back_on_garbage() {
         assert_eq!(parse_date_timestamp("not a date"), i64::MIN);
         assert_eq!(parse_date_timestamp(""), i64::MIN);
+    }
+
+    #[test]
+    fn decode_subject_handles_encoded_words() {
+        assert_eq!(decode_subject(b"=?utf-8?B?VHlwZVNhZmUgdXBkYXRlcw==?="), "TypeSafe updates");
+        assert_eq!(decode_subject(b"=?UTF-8?Q?Caf=C3=A9_menu?="), "Caf\u{e9} menu");
+        assert_eq!(decode_subject(b"Plain subject"), "Plain subject");
+        assert_eq!(decode_subject(b""), "");
     }
 
     #[test]

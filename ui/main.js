@@ -256,7 +256,11 @@ function showSetup({ account = null, message = "" } = {}) {
   if (account) prefillSetupForm(account);
   setupTitle.textContent = account ? "Reconnect your account" : accounts.length ? "Add an account" : "Connect your account";
   setupError.textContent = message;
-  cancelSetupBtn.classList.toggle("hidden", !usableAccounts().some((a) => a.username !== account?.username));
+  // Cancel is available whenever some usable account exists to return to —
+  // including the one being edited (canceling an edit just drops the changes
+  // and goes back to the app). It's only hidden when there is nothing to go
+  // back to, e.g. reconnecting the only account after its session expired.
+  cancelSetupBtn.classList.toggle("hidden", usableAccounts().length === 0);
   appView.classList.add("hidden");
   setupView.classList.remove("hidden");
   accountForm.elements[account ? "password" : "username"].focus();

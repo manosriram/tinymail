@@ -1,0 +1,39 @@
+/* Prototype 2 — "Plex Slate"
+   IBM Plex Sans for UI and reading, Plex Mono only for dates/counts (keeps the
+   current brand feel, but at legible weights). Cool slate accent, warm grays. */
+:root {
+  --bg: #fcfcfb;
+  --bg-subtle: #f4f4f2;
+  --bg-raised: #ffffff;
+  --bg-hover: #efefec;
+  --bg-selected: #e9eef2;
+  --border: #e2e2de;
+  --text: #1c1f22;
+  --text-muted: #4f565c;
+  --text-faint: #6d747a;
+  --accent: #3e5c76;
+  --accent-ink: #ffffff;
+  --accent-fg: #3a576f;
+  --font-sans: "IBM Plex Sans", -apple-system, "Segoe UI", sans-serif;
+  --font-meta: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --reading-size: 15px;
+}
+:root[data-theme="dark"] {
+  --bg: #16191c;
+  --bg-subtle: #1c2024;
+  --bg-raised: #1f2327;
+  --bg-hover: #252a2f;
+  --bg-selected: #212c35;
+  --border: #2d3237;
+  --text: #e6e8ea;
+  --text-muted: #a8afb5;
+  --text-faint: #879097;
+  --accent: #5d7f9c;
+  --accent-ink: #ffffff;
+  --accent-fg: #9fbad0;
+}
+body { font-feature-settings: normal; }
+.message-item .date, .detail-meta .meta-date { font-size: 11.5px; letter-spacing: -0.01em; }
+.folder-btn { font-size: 13.5px; }
+.folder-btn.active { color: var(--text); border-bottom-color: var(--accent); }
+.detail-subject { font-weight: 600; letter-spacing: -0.01em; }

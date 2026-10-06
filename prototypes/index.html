@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>tinymail — design prototypes</title>
+    <style>
+      body { margin: 0; padding: 32px; font: 14px/1.5 -apple-system, "Segoe UI", Inter, sans-serif; background: #eef0f3; color: #16181d; }
+      header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 24px; }
+      h1 { font-size: 20px; margin: 0; }
+      .toggle button { font: inherit; padding: 4px 12px; border: 1px solid #c9ced6; background: #fff; border-radius: 6px; cursor: pointer; }
+      .toggle button.on { background: #16181d; color: #fff; border-color: #16181d; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(620px, 1fr)); gap: 28px; }
+      figure { margin: 0; }
+      figcaption { margin-bottom: 8px; }
+      figcaption b { font-size: 15px; }
+      figcaption span { color: #555c66; }
+      .frame { width: 600px; height: 390px; overflow: hidden; border-radius: 10px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12); background: #fff; }
+      iframe { width: 1200px; height: 780px; border: 0; transform: scale(0.5); transform-origin: 0 0; }
+      a { color: inherit; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>tinymail — 5 design prototypes</h1>
+      <div class="toggle"><button data-t="light" class="on">Light</button> <button data-t="dark">Dark</button></div>
+    </header>
+    <div class="grid" id="grid"></div>
+    <script>
+      const protos = [
+        ["1 · Clean (shipped default)", "Inter, neutral grays, one calm blue accent, folder tabs."],
+        ["2 · Plex Slate", "IBM Plex Sans + Plex Mono dates, slate accent, warm grays."],
+        ["3 · Graphite Sidebar", "Three-pane with folder sidebar, monochrome graphite, compact list."],
+        ["4 · Reader", "Serif reading pane (Source Serif 4, 16.5px), warm paper, navy ink."],
+        ["5 · Native Mono", "System font, segmented folders, filled selection, black & white only."],
+      ];
+      function render(theme) {
+        document.getElementById("grid").innerHTML = protos
+          .map(([name, desc], i) => `<figure><figcaption><b><a href="/?p=${i + 1}&theme=${theme}" target="_blank">${name}</a></b><br><span>${desc}</span></figcaption>
+            <div class="frame"><iframe src="/?p=${i + 1}&theme=${theme}" loading="lazy"></iframe></div></figure>`)
+          .join("");
+      }
+      document.querySelectorAll(".toggle button").forEach((b) =>
+        b.addEventListener("click", () => {
+          document.querySelectorAll(".toggle button").forEach((x) => x.classList.toggle("on", x === b));
+          render(b.dataset.t);
+        })
+      );
+      render("light");
+    </script>
+  </body>
+</html>

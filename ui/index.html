@@ -9,79 +9,124 @@
   </head>
 
   <body>
-    <!-- Account setup -->
+    <!-- Account setup: first run, adding another account, or reconnecting an expired one -->
     <main id="setup-view" class="view">
-      <button type="button" class="theme-toggle" title="Toggle theme">🌙</button>
-      <h1>Connect your account</h1>
-      <form id="account-form">
-        <label>Email <input name="username" type="email" required /></label>
-        <label>Password <input name="password" type="password" required /></label>
-        <label>IMAP host <input name="imap_host" required placeholder="imap.example.com" /></label>
-        <label>IMAP port <input name="imap_port" type="number" value="993" required /></label>
-        <label>SMTP host <input name="smtp_host" required placeholder="smtp.example.com" /></label>
-        <label>SMTP port <input name="smtp_port" type="number" value="465" required /></label>
-        <label>Sent folder <input name="sent_folder" value="Sent" /></label>
-        <label>Drafts folder <input name="drafts_folder" value="Drafts" /></label>
-        <label>Archive folder <input name="archive_folder" value="Archive" /></label>
-        <label>Trash folder <input name="trash_folder" value="Trash" /></label>
-        <button type="submit">Connect</button>
-      </form>
-      <p id="setup-error" class="error"></p>
+      <div class="setup-card">
+        <div class="setup-head">
+          <span class="brand"><span class="brand-mark">tm</span>tinymail</span>
+          <div class="theme-switch" role="group" aria-label="Theme">
+            <button type="button" data-theme-choice="light" title="Light theme"><i data-icon="sun"></i></button>
+            <button type="button" data-theme-choice="dark" title="Dark theme"><i data-icon="moon"></i></button>
+          </div>
+        </div>
+        <h1 id="setup-title">Connect your account</h1>
+        <p class="setup-sub">Any IMAP + SMTP account. Credentials stay encrypted on this machine.</p>
+        <form id="account-form">
+          <label class="span-2">Email <input name="username" type="email" required autocomplete="off" /></label>
+          <label class="span-2">Password <input name="password" type="password" required /></label>
+          <label>IMAP host <input name="imap_host" required placeholder="imap.example.com" /></label>
+          <label>Port <input name="imap_port" type="number" value="993" required /></label>
+          <label>SMTP host <input name="smtp_host" required placeholder="smtp.example.com" /></label>
+          <label>Port <input name="smtp_port" type="number" value="465" required /></label>
+          <details class="span-2 folder-settings">
+            <summary>Folder names</summary>
+            <div class="folder-grid">
+              <label>Sent <input name="sent_folder" value="Sent" /></label>
+              <label>Drafts <input name="drafts_folder" value="Drafts" /></label>
+              <label>Archive <input name="archive_folder" value="Archive" /></label>
+              <label>Trash <input name="trash_folder" value="Trash" /></label>
+            </div>
+          </details>
+          <div class="setup-actions span-2">
+            <button type="button" id="cancel-setup-btn" class="btn hidden">Cancel</button>
+            <button type="submit" class="btn primary">Connect</button>
+          </div>
+        </form>
+        <p id="setup-error" class="error"></p>
+      </div>
     </main>
 
     <!-- Mail app -->
     <main id="app-view" class="view hidden">
       <header class="topbar">
-        <span class="app-title">tinymail</span>
+        <div class="account-switcher">
+          <button type="button" id="account-btn" class="account-btn" aria-haspopup="menu">
+            <span id="account-avatar" class="avatar"></span>
+            <span id="account-name" class="account-name"></span>
+            <i data-icon="chevron"></i>
+          </button>
+          <div id="account-menu" class="account-menu hidden" role="menu">
+            <div id="account-menu-list"></div>
+            <div class="menu-sep"></div>
+            <button type="button" class="menu-item" id="add-account-btn"><i data-icon="plus"></i>Add account…</button>
+            <button type="button" class="menu-item" id="manage-accounts-btn"><i data-icon="sliders"></i>Manage accounts</button>
+            <div class="menu-footer" id="app-version">tinymail</div>
+          </div>
+        </div>
+        <label class="search">
+          <i data-icon="search"></i>
+          <input id="search-input" type="search" placeholder="Search messages" autocomplete="off" spellcheck="false" />
+          <kbd data-mod-key="K"></kbd>
+        </label>
         <div class="topbar-actions">
-          <button type="button" class="theme-toggle" title="Toggle theme">🌙</button>
-          <button id="compose-btn">Compose</button>
+          <div class="theme-switch" role="group" aria-label="Theme">
+            <button type="button" data-theme-choice="light" title="Light theme"><i data-icon="sun"></i></button>
+            <button type="button" data-theme-choice="dark" title="Dark theme"><i data-icon="moon"></i></button>
+          </div>
+          <button type="button" id="compose-btn" class="btn primary"><i data-icon="pencil"></i>Compose <kbd>C</kbd></button>
         </div>
       </header>
+
+      <nav class="folder-tabs">
+        <span></span>
+        <div class="tabs">
+          <button class="folder-btn active" data-folder="INBOX">Inbox <span class="unread-badge hidden" id="inbox-unread-badge"></span></button>
+          <button class="folder-btn" data-folder="SENT">Sent</button>
+          <button class="folder-btn" data-folder="DRAFTS">Drafts</button>
+          <button class="folder-btn" data-folder="ARCHIVE">Archive</button>
+          <button class="folder-btn" data-folder="TRASH">Trash</button>
+        </div>
+        <button id="refresh-btn" class="icon-btn" title="Refresh"><i data-icon="refresh"></i></button>
+      </nav>
+
       <div class="app-body">
-        <aside class="sidebar">
-          <nav>
-            <button class="folder-btn active" data-folder="INBOX">Inbox <span class="unread-badge hidden" id="inbox-unread-badge"></span></button>
-            <button class="folder-btn" data-folder="SENT">Sent</button>
-            <button class="folder-btn" data-folder="DRAFTS">Drafts</button>
-            <button class="folder-btn" data-folder="ARCHIVE">Archive</button>
-            <button class="folder-btn" data-folder="TRASH">Trash</button>
-          </nav>
-        </aside>
-
-        <section class="message-list-panel">
-          <div class="message-list-header">
-            <span id="folder-title">Inbox</span>
-            <button id="refresh-btn" title="Refresh">⟳</button>
-          </div>
-          <div class="message-list" id="message-list"></div>
-        </section>
-
-        <section class="message-detail" id="message-detail">
-          <p class="placeholder">Select a message</p>
-        </section>
+        <section class="message-list" id="message-list"></section>
+        <section class="message-detail" id="message-detail"></section>
       </div>
     </main>
 
     <!-- Compose modal -->
     <div id="compose-modal" class="modal hidden">
-      <form id="compose-form" class="modal-content">
+      <form id="compose-form" class="modal-content compose">
         <h2>New message</h2>
-        <label>To <input name="to" type="email" required /></label>
-        <label>Cc <input name="cc" type="email" multiple /></label>
-        <label>Bcc <input name="bcc" type="email" multiple /></label>
-        <label>Subject <input name="subject" /></label>
-        <label>Body <textarea name="body" rows="10"></textarea></label>
-        <label>Attachments
-          <input id="attachment-picker" type="button" value="Add files..." />
-          <ul id="attachment-list"></ul>
-        </label>
+        <label class="field"><span>From</span><select name="from" id="compose-from"></select></label>
+        <label class="field"><span>To</span><input name="to" type="email" required /></label>
+        <label class="field"><span>Cc</span><input name="cc" type="email" multiple /></label>
+        <label class="field"><span>Bcc</span><input name="bcc" type="email" multiple /></label>
+        <label class="field"><span>Subject</span><input name="subject" /></label>
+        <textarea name="body" rows="12" placeholder="Write your message…"></textarea>
+        <ul id="attachment-list" class="attachment-list"></ul>
         <div class="modal-actions">
-          <button type="button" id="save-draft-btn">Save draft</button>
-          <button type="submit">Send</button>
-          <button type="button" id="cancel-compose-btn">Cancel</button>
+          <button type="button" id="attachment-picker" class="btn"><i data-icon="paperclip"></i>Attach</button>
+          <span class="spacer"></span>
+          <button type="button" id="cancel-compose-btn" class="btn">Cancel</button>
+          <button type="button" id="save-draft-btn" class="btn">Save draft</button>
+          <button type="submit" class="btn primary"><i data-icon="send"></i>Send</button>
         </div>
       </form>
+    </div>
+
+    <!-- Manage accounts modal -->
+    <div id="accounts-modal" class="modal hidden">
+      <div class="modal-content accounts">
+        <h2>Accounts</h2>
+        <ul id="accounts-manage-list" class="manage-list"></ul>
+        <div class="modal-actions">
+          <button type="button" id="manage-add-btn" class="btn"><i data-icon="plus"></i>Add account</button>
+          <span class="spacer"></span>
+          <button type="button" id="close-accounts-btn" class="btn primary">Done</button>
+        </div>
+      </div>
     </div>
 
     <div id="toast" class="toast hidden"></div>

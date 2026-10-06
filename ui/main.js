@@ -1,7 +1,41 @@
 const { invoke } = window.__TAURI__.core;
 const { open, confirm } = window.__TAURI__.dialog;
 
-// Theme toggle: defaults to the OS preference, overridden once the user picks explicitly.
+// Inline icons (Lucide-style strokes) so the UI ships no icon font or network
+// fetch. Static markup uses <i data-icon="name"> placeholders, swapped below.
+const ICON_PATHS = {
+  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  pencil: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
+  chevron: '<path d="m6 9 6 6 6-6"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+  moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  reply: '<path d="m9 17-5-5 5-5"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
+  forward: '<path d="m15 17 5-5-5-5"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/>',
+  archive: '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+  undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+  plus: '<path d="M5 12h14M12 5v14"/>',
+  sliders: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  paperclip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+  file: '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><path d="M14 2v6h6"/>',
+  mail: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+};
+
+function icon(name) {
+  return `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
+}
+
+document.querySelectorAll("i[data-icon]").forEach((el) => (el.outerHTML = icon(el.dataset.icon)));
+
+const IS_MAC = /Mac/i.test(navigator.userAgent);
+const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl+";
+document.querySelectorAll("[data-mod-key]").forEach((el) => (el.textContent = `${MOD_LABEL}${el.dataset.modKey}`));
+
+// Theme: defaults to the OS preference, overridden once the user picks explicitly.
 const THEME_KEY = "tinymail-theme";
 
 function systemPrefersDark() {
@@ -17,12 +51,12 @@ function applyTheme() {
   const stored = localStorage.getItem(THEME_KEY);
   if (stored) document.documentElement.setAttribute("data-theme", stored);
   else document.documentElement.removeAttribute("data-theme");
-  const icon = isDarkActive() ? "☀️" : "🌙";
-  document.querySelectorAll(".theme-toggle").forEach((btn) => (btn.textContent = icon));
+  const active = isDarkActive() ? "dark" : "light";
+  document.querySelectorAll("[data-theme-choice]").forEach((btn) => btn.classList.toggle("active", btn.dataset.themeChoice === active));
 }
 
-function toggleTheme() {
-  localStorage.setItem(THEME_KEY, isDarkActive() ? "light" : "dark");
+function setTheme(choice) {
+  localStorage.setItem(THEME_KEY, choice);
   applyTheme();
   // The open message's HTML body lives in a sandboxed iframe with its own
   // document, so it doesn't pick up the new theme via CSS — re-render it.
@@ -31,7 +65,8 @@ function toggleTheme() {
   }
 }
 
-document.querySelectorAll(".theme-toggle").forEach((btn) => btn.addEventListener("click", toggleTheme));
+document.querySelectorAll("[data-theme-choice]").forEach((btn) => btn.addEventListener("click", () => setTheme(btn.dataset.themeChoice)));
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
 applyTheme();
 
 // Status toast: transient bottom-left feedback for actions that run in the
@@ -46,89 +81,313 @@ function showToast(text, { autoHideMs } = {}) {
   if (autoHideMs) toastHideTimer = setTimeout(() => toastEl.classList.add("hidden"), autoHideMs);
 }
 
+// Every IMAP-backed command takes the username of the account it acts on —
+// all state below is keyed by it, so async results that land after the user
+// switched accounts (or folders) update their cache without touching the view.
+let accounts = []; // [{ username, imap_host, ..., expired }] in switcher order
+let currentAccount = null; // username of the account being viewed
 let currentFolder = "INBOX";
-let currentMessage = null; // { folder, uid, from, subject, body }
-let currentAccountUsername = null; // set once we know which account is active; scopes the persisted message cache
+let currentMessage = null; // { account, folder, uid, from, to, cc, date, subject, body, body_html }
 let attachmentPaths = [];
-const folderCache = {}; // folder -> messages[], avoids refetching on every nav click
-const messageDetailCache = {}; // "folder:uid" -> last-fetched MessageDetail, so reopening a message already viewed this session is instant
+let searchQuery = "";
+let openToken = 0; // bumped per message open, so a slow fetch can't overwrite a newer selection
+const folderCache = {}; // account -> folder -> messages[], avoids refetching on every nav click
+const messageDetailCache = {}; // "account:folder:uid" -> last-fetched MessageDetail, so reopening a message already viewed this session is instant
+const knownUnreadUids = {}; // account -> Set of unread INBOX uids; baseline for new-mail notifications
 
-const FOLDER_TITLES = { INBOX: "Inbox", SENT: "Sent", DRAFTS: "Drafts", ARCHIVE: "Archive", TRASH: "Trash" };
+const FOLDERS = ["INBOX", "SENT", "DRAFTS", "ARCHIVE", "TRASH"];
+const ACTIVE_ACCOUNT_KEY = "tinymail-active-account";
+const POLL_INTERVAL_MS = 60000;
+const AVATAR_COLORS = ["#5b7aa8", "#5f8a6e", "#9a7a56", "#80699e", "#4f8486", "#a5666b", "#6f7b88"];
 
 const setupView = document.getElementById("setup-view");
 const appView = document.getElementById("app-view");
+const setupTitle = document.getElementById("setup-title");
 const setupError = document.getElementById("setup-error");
+const accountForm = document.getElementById("account-form");
+const cancelSetupBtn = document.getElementById("cancel-setup-btn");
 const messageList = document.getElementById("message-list");
 const messageDetail = document.getElementById("message-detail");
-const folderTitle = document.getElementById("folder-title");
 const refreshBtn = document.getElementById("refresh-btn");
 const inboxUnreadBadge = document.getElementById("inbox-unread-badge");
+const accountBtn = document.getElementById("account-btn");
+const accountMenu = document.getElementById("account-menu");
+const accountMenuList = document.getElementById("account-menu-list");
+const accountsModal = document.getElementById("accounts-modal");
+const accountsManageList = document.getElementById("accounts-manage-list");
+const searchInput = document.getElementById("search-input");
 
-let knownUnreadUids = null; // null until the first INBOX poll establishes a baseline
-const POLL_INTERVAL_MS = 60000;
+function folders(account) {
+  return (folderCache[account] ??= {});
+}
+
+function isViewing(account, folder) {
+  return account === currentAccount && folder === currentFolder;
+}
+
+function usableAccounts() {
+  return accounts.filter((a) => !a.expired);
+}
 
 // Persisted, per-account message-list cache (localStorage survives app
 // restarts, unlike `folderCache`), so a returning user sees their last-known
 // mail instantly instead of a "Loading..." screen while IMAP reconnects.
 // Keyed by account username so switching accounts can never show a stale
-// list from a previous one.
-function cacheKey(username, folder) {
-  return `tinymail-cache:${username}:${folder}`;
+// list from another one.
+function cacheKey(account, folder) {
+  return `tinymail-cache:${account}:${folder}`;
 }
 
-function persistFolderCache(folder) {
-  if (!currentAccountUsername) return;
-  const messages = folderCache[folder];
+function persistFolderCache(account, folder) {
+  const messages = folderCache[account]?.[folder];
   if (!messages) return;
   try {
-    localStorage.setItem(cacheKey(currentAccountUsername, folder), JSON.stringify(messages));
+    localStorage.setItem(cacheKey(account, folder), JSON.stringify(messages));
   } catch (err) {
     console.error(err); // best-effort cache — storage full/unavailable is not fatal
   }
 }
 
-function loadPersistedFolderCache(username, folder) {
+function loadPersistedFolderCache(account, folder) {
   try {
-    const raw = localStorage.getItem(cacheKey(username, folder));
+    const raw = localStorage.getItem(cacheKey(account, folder));
     return raw ? JSON.parse(raw) : null;
   } catch (err) {
     return null;
   }
 }
 
-function removePersistedFolderCache(folder) {
-  if (!currentAccountUsername) return;
-  localStorage.removeItem(cacheKey(currentAccountUsername, folder));
+function removePersistedFolderCache(account, folder) {
+  localStorage.removeItem(cacheKey(account, folder));
 }
 
-// Opens a folder for viewing: if it's already loaded this session, defer to
-// the normal cache-or-fetch behavior in loadFolder. Otherwise, paint a stale
-// copy from the on-disk cache (if any) immediately, then always refresh from
-// the server — silently, so a good cache doesn't get blown away by a
-// "Loading..." flash.
-function openFolder(folder) {
-  if (folderCache[folder]) {
-    return loadFolder(folder);
-  }
-  const persisted = loadPersistedFolderCache(currentAccountUsername, folder);
-  if (persisted) {
-    folderCache[folder] = persisted;
-    renderMessageList(folder, persisted);
-  }
-  return loadFolder(folder, { force: true, silent: !!persisted });
+function inboxUnreadCount(account) {
+  const inbox = folderCache[account]?.INBOX ?? loadPersistedFolderCache(account, "INBOX") ?? [];
+  return inbox.filter((m) => m.unread).length;
 }
 
-function showApp(username) {
-  currentAccountUsername = username;
-  window.__TAURI__.app.getVersion().then((version) => {
-    document.querySelector(".app-title").textContent = `tinymail (${version})`;
-  });
+function avatarColor(username) {
+  let hash = 0;
+  for (const ch of username) hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
+
+function avatarInitial(username) {
+  return (username.match(/[a-z0-9]/i)?.[0] ?? "?").toUpperCase();
+}
+
+function avatarHtml(username, extraClass = "") {
+  return `<span class="avatar ${extraClass}" style="--av:${avatarColor(username)}">${avatarInitial(username)}</span>`;
+}
+
+// ---- Account switcher -------------------------------------------------------
+
+function renderAccountSwitcher() {
+  if (!currentAccount) return;
+  const avatar = document.getElementById("account-avatar");
+  avatar.style.setProperty("--av", avatarColor(currentAccount));
+  avatar.textContent = avatarInitial(currentAccount);
+  document.getElementById("account-name").textContent = currentAccount;
+
+  const count = inboxUnreadCount(currentAccount);
+  inboxUnreadBadge.textContent = String(count);
+  inboxUnreadBadge.classList.toggle("hidden", count === 0);
+
+  accountMenuList.innerHTML = accounts
+    .map((a, i) => {
+      const active = a.username === currentAccount;
+      const unread = a.expired ? 0 : inboxUnreadCount(a.username);
+      const status = a.expired
+        ? `<span class="tag">Reconnect</span>`
+        : unread
+          ? `<span class="count${active ? " on" : ""}">${unread}</span>`
+          : "";
+      return `<button type="button" class="menu-item" role="menuitem" data-account="${escapeHtml(a.username)}">
+        ${avatarHtml(a.username)}
+        <span class="email">${escapeHtml(a.username)}</span>
+        ${status}
+        <span class="check">${active ? icon("check") : ""}</span>
+        <span class="shortcut">${i < 9 ? `${MOD_LABEL}${i + 1}` : ""}</span>
+      </button>`;
+    })
+    .join("");
+  accountMenuList.querySelectorAll("[data-account]").forEach((btn) => btn.addEventListener("click", () => switchAccount(btn.dataset.account)));
+}
+
+function toggleAccountMenu(force) {
+  const show = force ?? accountMenu.classList.contains("hidden");
+  accountMenu.classList.toggle("hidden", !show);
+  accountBtn.setAttribute("aria-expanded", String(show));
+}
+
+accountBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleAccountMenu();
+});
+document.addEventListener("click", (e) => {
+  if (!accountMenu.contains(e.target)) toggleAccountMenu(false);
+});
+document.getElementById("add-account-btn").addEventListener("click", () => showSetup());
+document.getElementById("manage-accounts-btn").addEventListener("click", openManageAccounts);
+
+function switchAccount(username) {
+  toggleAccountMenu(false);
+  const account = accounts.find((a) => a.username === username);
+  if (!account) return;
+  if (account.expired) {
+    showSetup({ account, message: "Your session expired — please re-enter your password." });
+    return;
+  }
+  currentAccount = username;
+  localStorage.setItem(ACTIVE_ACCOUNT_KEY, username);
+  currentMessage = null;
+  searchQuery = "";
+  searchInput.value = "";
+  renderAccountSwitcher();
+  openFolder(currentFolder);
+}
+
+// ---- Setup / add / reconnect ------------------------------------------------
+
+function showSetup({ account = null, message = "" } = {}) {
+  toggleAccountMenu(false);
+  accountsModal.classList.add("hidden");
+  accountForm.reset();
+  if (account) prefillSetupForm(account);
+  setupTitle.textContent = account ? "Reconnect your account" : accounts.length ? "Add an account" : "Connect your account";
+  setupError.textContent = message;
+  cancelSetupBtn.classList.toggle("hidden", !usableAccounts().some((a) => a.username !== account?.username));
+  appView.classList.add("hidden");
+  setupView.classList.remove("hidden");
+  accountForm.elements[account ? "password" : "username"].focus();
+}
+
+function prefillSetupForm(account) {
+  for (const field of ["username", "imap_host", "imap_port", "smtp_host", "smtp_port", "sent_folder", "drafts_folder", "archive_folder", "trash_folder"]) {
+    accountForm.elements[field].value = account[field];
+  }
+}
+
+cancelSetupBtn.addEventListener("click", () => {
+  const usable = usableAccounts();
+  const fallback = usable.find((a) => a.username === currentAccount) ?? usable[0];
+  if (fallback) enterApp(fallback.username);
+});
+
+accountForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target);
+  const account = {
+    username: form.get("username").trim(),
+    imap_host: form.get("imap_host").trim(),
+    imap_port: Number(form.get("imap_port")),
+    smtp_host: form.get("smtp_host").trim(),
+    smtp_port: Number(form.get("smtp_port")),
+    sent_folder: form.get("sent_folder") || "Sent",
+    drafts_folder: form.get("drafts_folder") || "Drafts",
+    archive_folder: form.get("archive_folder") || "Archive",
+    trash_folder: form.get("trash_folder") || "Trash",
+  };
+  const password = form.get("password");
+  setupError.textContent = "";
+  try {
+    await invoke("save_account", { account, password });
+    // Saved settings may differ from before (reconnect/edit) — drop anything cached under the old ones.
+    forgetAccountCaches(account.username);
+    accounts = await invoke("list_accounts");
+    enterApp(account.username);
+  } catch (err) {
+    setupError.textContent = String(err);
+  }
+});
+
+// ---- Manage accounts --------------------------------------------------------
+
+function openManageAccounts() {
+  toggleAccountMenu(false);
+  accountsManageList.innerHTML = accounts
+    .map(
+      (a) => `<li class="manage-row">
+        ${avatarHtml(a.username, "lg")}
+        <div class="who">
+          <div class="email">${escapeHtml(a.username)}</div>
+          <div class="host">${escapeHtml(a.imap_host)}:${a.imap_port} · ${escapeHtml(a.smtp_host)}:${a.smtp_port}</div>
+        </div>
+        ${a.expired ? '<span class="tag">Expired</span>' : ""}
+        <button type="button" class="btn" data-edit="${escapeHtml(a.username)}">${a.expired ? "Reconnect" : "Edit"}</button>
+        <button type="button" class="btn danger" data-remove="${escapeHtml(a.username)}">Remove</button>
+      </li>`
+    )
+    .join("");
+  accountsManageList.querySelectorAll("[data-edit]").forEach((btn) =>
+    btn.addEventListener("click", () => showSetup({ account: accounts.find((a) => a.username === btn.dataset.edit) }))
+  );
+  accountsManageList.querySelectorAll("[data-remove]").forEach((btn) => btn.addEventListener("click", () => removeAccount(btn.dataset.remove)));
+  accountsModal.classList.remove("hidden");
+}
+
+document.getElementById("close-accounts-btn").addEventListener("click", () => accountsModal.classList.add("hidden"));
+document.getElementById("manage-add-btn").addEventListener("click", () => showSetup());
+
+function forgetAccountCaches(username) {
+  delete folderCache[username];
+  delete knownUnreadUids[username];
+  for (const folder of FOLDERS) removePersistedFolderCache(username, folder);
+  for (const key of Object.keys(messageDetailCache)) {
+    if (key.startsWith(`${username}:`)) delete messageDetailCache[key];
+  }
+}
+
+async function removeAccount(username) {
+  const ok = await confirm(`Remove ${username} from tinymail? Mail on the server is not affected.`, { title: "tinymail", kind: "warning" });
+  if (!ok) return;
+  try {
+    await invoke("remove_account", { account: username });
+  } catch (err) {
+    showToast(`Failed: ${err}`, { autoHideMs: 4000 });
+    return;
+  }
+  forgetAccountCaches(username);
+  accounts = await invoke("list_accounts");
+  if (accounts.length === 0) {
+    currentAccount = null;
+    localStorage.removeItem(ACTIVE_ACCOUNT_KEY);
+    showSetup();
+    return;
+  }
+  if (username === currentAccount) {
+    const next = usableAccounts()[0];
+    if (next) switchAccount(next.username);
+    else {
+      showSetup({ account: accounts[0], message: "Your session expired — please re-enter your password." });
+      return;
+    }
+  } else {
+    renderAccountSwitcher();
+  }
+  openManageAccounts();
+  showToast(`Removed ${username}`, { autoHideMs: 2000 });
+}
+
+// ---- App lifecycle ----------------------------------------------------------
+
+let appStarted = false;
+
+function enterApp(username) {
   setupView.classList.add("hidden");
   appView.classList.remove("hidden");
-  openFolder(currentFolder).then(() => {
-    knownUnreadUids = new Set((folderCache.INBOX ?? []).filter((m) => m.unread).map((m) => m.uid));
+  switchAccount(username);
+  if (appStarted) return;
+  appStarted = true;
+  window.__TAURI__.app.getVersion().then((version) => {
+    document.getElementById("app-version").textContent = `tinymail v${version}`;
   });
-  setInterval(checkForNewMail, POLL_INTERVAL_MS);
+  // Fetch the other accounts' inboxes up front so the switcher shows real
+  // unread counts (and new-mail baselines exist) before the first poll.
+  for (const a of usableAccounts()) {
+    if (a.username !== username) checkForNewMail(a.username);
+  }
+  setInterval(() => usableAccounts().forEach((a) => checkForNewMail(a.username)), POLL_INTERVAL_MS);
 }
 
 // The window starts hidden (see tauri.conf.json) so the OS never paints a
@@ -150,14 +409,18 @@ async function showWindow() {
 
 async function init() {
   try {
-    const [account, expired] = await Promise.all([invoke("get_account"), invoke("is_expired")]);
-    if (!account) return;
-    if (expired) {
-      prefillSetupForm(account);
-      setupError.textContent = "Your session expired — please re-enter your password.";
+    accounts = await invoke("list_accounts");
+    if (accounts.length === 0) {
+      showSetup();
       return;
     }
-    showApp(account.username);
+    const saved = localStorage.getItem(ACTIVE_ACCOUNT_KEY);
+    const initial = accounts.find((a) => a.username === saved && !a.expired) ?? usableAccounts()[0] ?? accounts[0];
+    if (initial.expired) {
+      showSetup({ account: initial, message: "Your session expired — please re-enter your password." });
+      return;
+    }
+    enterApp(initial.username);
   } catch (e) {
     console.error(e);
   } finally {
@@ -165,42 +428,7 @@ async function init() {
   }
 }
 
-function prefillSetupForm(account) {
-  const form = document.getElementById("account-form");
-  form.elements.username.value = account.username;
-  form.elements.imap_host.value = account.imap_host;
-  form.elements.imap_port.value = account.imap_port;
-  form.elements.smtp_host.value = account.smtp_host;
-  form.elements.smtp_port.value = account.smtp_port;
-  form.elements.sent_folder.value = account.sent_folder;
-  form.elements.drafts_folder.value = account.drafts_folder;
-  form.elements.archive_folder.value = account.archive_folder;
-  form.elements.trash_folder.value = account.trash_folder;
-}
-
-document.getElementById("account-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const form = new FormData(e.target);
-  const account = {
-    username: form.get("username"),
-    imap_host: form.get("imap_host"),
-    imap_port: Number(form.get("imap_port")),
-    smtp_host: form.get("smtp_host"),
-    smtp_port: Number(form.get("smtp_port")),
-    sent_folder: form.get("sent_folder") || "Sent",
-    drafts_folder: form.get("drafts_folder") || "Drafts",
-    archive_folder: form.get("archive_folder") || "Archive",
-    trash_folder: form.get("trash_folder") || "Trash",
-  };
-  const password = form.get("password");
-  setupError.textContent = "";
-  try {
-    await invoke("save_account", { account, password });
-    showApp(account.username);
-  } catch (err) {
-    setupError.textContent = String(err);
-  }
-});
+// ---- Folders & message list -------------------------------------------------
 
 document.querySelectorAll(".folder-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -211,87 +439,172 @@ document.querySelectorAll(".folder-btn").forEach((btn) => {
   });
 });
 
-refreshBtn.addEventListener("click", () => loadFolder(currentFolder, { force: true }));
+refreshBtn.addEventListener("click", () => loadFolder(currentAccount, currentFolder, { force: true }));
 
-// Renders a raw date string (IMAP envelope / RFC3339 header text, in whatever
-// timezone the sender's server stamped it) in the viewer's own local time.
+searchInput.addEventListener("input", () => {
+  searchQuery = searchInput.value;
+  renderMessageList();
+});
+
+// Opens a folder for viewing: if it's already loaded this session, defer to
+// the normal cache-or-fetch behavior in loadFolder. Otherwise, paint a stale
+// copy from the on-disk cache (if any) immediately, then always refresh from
+// the server — silently, so a good cache doesn't get blown away by a
+// "Loading..." flash.
+function openFolder(folder) {
+  const account = currentAccount;
+  if (folders(account)[folder]) {
+    return loadFolder(account, folder);
+  }
+  const persisted = loadPersistedFolderCache(account, folder);
+  if (persisted) {
+    folders(account)[folder] = persisted;
+    renderMessageList();
+  }
+  return loadFolder(account, folder, { force: true, silent: !!persisted });
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Date strings arrive as IMAP envelope / RFC3339 header text, in whatever
+// timezone the sender's server stamped them; both helpers render them in the
+// viewer's local time. The list uses a compact form ("14:05", "21 Sep",
+// "21 Sep 2024"); the reading pane shows the full "21 Sep 2026, 14:05".
+const pad2 = (n) => String(n).padStart(2, "0");
+
+function formatShortDate(raw) {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return raw;
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const day = `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+  return d.getFullYear() === now.getFullYear() ? day : `${day} ${d.getFullYear()}`;
+}
+
+function formatLongDate(raw) {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return raw;
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
 function formatLocalDate(raw) {
   if (!raw) return "";
   const parsed = new Date(raw);
   if (isNaN(parsed.getTime())) return raw;
-  return parsed.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return parsed.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-function renderMessageList(folder, messages) {
-  folderTitle.textContent = FOLDER_TITLES[folder] ?? folder;
-  if (folder === "INBOX") updateUnreadBadge(messages);
+// Renders the current account + folder's cached list (filtered by search).
+function renderMessageList() {
+  renderAccountSwitcher();
+  const messages = folderCache[currentAccount]?.[currentFolder];
+  if (!messages) return;
 
-  if (messages.length === 0) {
-    messageList.innerHTML = "<p class='placeholder'>No messages</p>";
+  const q = searchQuery.trim().toLowerCase();
+  const shown = q ? messages.filter((m) => m.from.toLowerCase().includes(q) || m.subject.toLowerCase().includes(q)) : messages;
+  if (shown.length === 0) {
+    messageList.innerHTML = `<p class='placeholder'>${q ? "No matching messages" : "No messages"}</p>`;
     return;
   }
+  const activeUid = currentMessage?.account === currentAccount && currentMessage?.folder === currentFolder ? currentMessage.uid : null;
   messageList.innerHTML = "";
-  for (const m of messages) {
+  if (currentFolder === "TRASH" && !q) {
+    const bar = document.createElement("div");
+    bar.className = "list-banner";
+    bar.innerHTML = `<span>${messages.length} message${messages.length === 1 ? "" : "s"} in Trash</span><button type="button" class="btn danger">${icon("trash")}Empty Trash</button>`;
+    bar.querySelector("button").addEventListener("click", emptyTrash);
+    messageList.appendChild(bar);
+  }
+  for (const m of shown) {
     const item = document.createElement("div");
-    item.className = m.unread ? "message-item unread" : "message-item";
+    item.className = `message-item${m.unread ? " unread" : ""}${m.uid === activeUid ? " active" : ""}`;
     item.dataset.uid = String(m.uid);
-    item.innerHTML = `${m.unread ? '<span class="unread-dot"></span>' : ""}<strong>${escapeHtml(m.from)}</strong><br/><span class="subject">${escapeHtml(m.subject)}</span><br/><span class="date">${escapeHtml(formatLocalDate(m.date))}</span>`;
-    item.addEventListener("click", () => {
-      messageList.querySelectorAll(".message-item").forEach((el) => el.classList.remove("active"));
-      item.classList.add("active");
-      showMessage(folder, m.uid);
-    });
+    item.innerHTML = `<span class="unread-dot"></span>
+      <div>
+        <div class="message-row"><span class="from">${escapeHtml(m.from)}</span><span class="date">${escapeHtml(formatShortDate(m.date))}</span></div>
+        <div class="subject">${escapeHtml(m.subject || "(no subject)")}</div>
+      </div>`;
+    item.addEventListener("click", () => selectMessageItem(item));
     messageList.appendChild(item);
   }
 }
 
-function updateUnreadBadge(inboxMessages) {
-  const count = inboxMessages.filter((m) => m.unread).length;
-  if (count === 0) {
-    inboxUnreadBadge.classList.add("hidden");
-  } else {
-    inboxUnreadBadge.textContent = String(count);
-    inboxUnreadBadge.classList.remove("hidden");
-  }
+function selectMessageItem(item) {
+  messageList.querySelectorAll(".message-item").forEach((el) => el.classList.remove("active"));
+  item.classList.add("active");
+  item.scrollIntoView({ block: "nearest" });
+  showMessage(currentAccount, currentFolder, Number(item.dataset.uid));
 }
 
-async function loadFolder(folder, { force = false, silent = false } = {}) {
-  messageDetail.innerHTML = "<p class='placeholder'>Select a message</p>";
-  currentMessage = null;
+function moveSelection(delta) {
+  const items = [...messageList.querySelectorAll(".message-item")];
+  if (items.length === 0) return;
+  const current = items.findIndex((el) => el.classList.contains("active"));
+  const next = current === -1 ? 0 : Math.min(items.length - 1, Math.max(0, current + delta));
+  if (next !== current) selectMessageItem(items[next]);
+}
 
-  if (!force && folderCache[folder]) {
-    renderMessageList(folder, folderCache[folder]);
+function clearDetail() {
+  currentMessage = null;
+  messageDetail.innerHTML = `<div class="detail-empty">${icon("mail")}<span>Select a message</span><span class="hint"><kbd>J</kbd><kbd>K</kbd> to move · <kbd>C</kbd> to compose</span></div>`;
+}
+
+async function loadFolder(account, folder, { force = false, silent = false } = {}) {
+  if (isViewing(account, folder)) clearDetail();
+
+  if (!force && folders(account)[folder]) {
+    if (isViewing(account, folder)) renderMessageList();
     return;
   }
 
-  if (!silent) messageList.innerHTML = "<p class='placeholder'>Loading...</p>";
+  if (!silent && isViewing(account, folder)) messageList.innerHTML = "<p class='placeholder'>Loading...</p>";
   refreshBtn.classList.add("spinning");
   try {
-    const messages = await invoke("list_messages", { folder });
-    folderCache[folder] = messages;
-    persistFolderCache(folder);
-    renderMessageList(folder, messages);
+    const messages = await invoke("list_messages", { account, folder });
+    if (!folderCache[account]) return; // account removed while loading
+    folderCache[account][folder] = messages;
+    persistFolderCache(account, folder);
+    prefetch(account, folder, messages.slice(0, PREFETCH_TOP).map((m) => m.uid));
+    if (folder === "INBOX" && !knownUnreadUids[account]) {
+      knownUnreadUids[account] = new Set(messages.filter((m) => m.unread).map((m) => m.uid));
+    }
+    if (isViewing(account, folder)) renderMessageList();
+    else renderAccountSwitcher();
   } catch (err) {
-    if (silent) {
+    if (silent || !isViewing(account, folder)) {
       console.error(err); // keep showing the cached list already on screen instead of replacing it with an error
     } else {
-      messageList.innerHTML = `<p class="error">${escapeHtml(String(err))}</p>`;
+      messageList.innerHTML = `<p class="error placeholder">${escapeHtml(String(err))}</p>`;
     }
   } finally {
     refreshBtn.classList.remove("spinning");
   }
 }
 
-function invalidateFolder(folder) {
-  delete folderCache[folder];
-  removePersistedFolderCache(folder);
-  if (currentFolder === folder) loadFolder(folder, { force: true });
+// Optimistic like moveCurrentMessage: the list empties at once and the
+// server catches up; on failure the folder is reloaded to show what's left.
+async function emptyTrash() {
+  const account = currentAccount;
+  if (!(await confirm("Permanently delete all messages in Trash? This cannot be undone.", { title: "tinymail", kind: "warning" }))) return;
+  clearDetail();
+  folders(account).TRASH = [];
+  persistFolderCache(account, "TRASH");
+  if (isViewing(account, "TRASH")) renderMessageList();
+  showToast("Emptying Trash...");
+  invoke("empty_trash", { account })
+    .then(() => showToast("Trash emptied", { autoHideMs: 2000 }))
+    .catch((err) => {
+      showToast(`Failed: ${err}`, { autoHideMs: 4000 });
+      loadFolder(account, "TRASH", { force: true });
+    });
+}
+
+function invalidateFolder(account, folder) {
+  if (folderCache[account]) delete folderCache[account][folder];
+  removePersistedFolderCache(account, folder);
+  if (isViewing(account, folder)) loadFolder(account, folder, { force: true });
 }
 
 async function confirmAndMove(question, command, destFolder, statusLabels) {
@@ -306,105 +619,154 @@ async function confirmAndMove(question, command, destFolder, statusLabels) {
 // view with what the server actually did.
 function moveCurrentMessage(command, destFolder, { inProgress = "Working...", done = "Done" } = {}) {
   if (!currentMessage) return;
-  const { folder, uid } = currentMessage;
-  currentMessage = null;
-  messageDetail.innerHTML = "<p class='placeholder'>Select a message</p>";
+  const { account, folder, uid } = currentMessage;
+  clearDetail();
 
-  if (folderCache[folder]) {
-    folderCache[folder] = folderCache[folder].filter((m) => m.uid !== uid);
-    persistFolderCache(folder);
-    if (currentFolder === folder) renderMessageList(folder, folderCache[folder]);
-    else if (folder === "INBOX") updateUnreadBadge(folderCache[folder]);
+  const cache = folderCache[account];
+  if (cache?.[folder]) {
+    cache[folder] = cache[folder].filter((m) => m.uid !== uid);
+    persistFolderCache(account, folder);
+    if (isViewing(account, folder)) renderMessageList();
+    else renderAccountSwitcher();
   }
   if (destFolder) {
-    delete folderCache[destFolder];
-    removePersistedFolderCache(destFolder);
+    if (cache) delete cache[destFolder];
+    removePersistedFolderCache(account, destFolder);
   }
 
   showToast(inProgress);
-  invoke(command, { folder, uid })
+  invoke(command, { account, folder, uid })
     .then(() => showToast(done, { autoHideMs: 2000 }))
     .catch((err) => {
       showToast(`Failed: ${err}`, { autoHideMs: 4000 });
-      if (currentFolder === folder) loadFolder(folder, { force: true });
+      if (isViewing(account, folder)) loadFolder(account, folder, { force: true });
     });
 }
 
-async function showMessage(folder, uid) {
-  const cacheKey = `${folder}:${uid}`;
-  const cached = messageDetailCache[cacheKey];
+// ---- Message view -----------------------------------------------------------
+
+async function showMessage(account, folder, uid) {
+  const token = ++openToken;
+  const key = `${account}:${folder}:${uid}`;
+  // A UID's content never changes on an IMAP server, so a message fetched
+  // once this session is rendered straight from memory with no round trip.
+  const cached = messageDetailCache[key];
   if (cached) {
-    // Instant: render what we already fetched this session, then quietly
-    // refresh from the server in case it changed (e.g. read elsewhere) —
-    // without re-showing "Loading..." over the content that's already there.
-    renderMessage(folder, uid, cached);
-    markMessageRead(folder, uid);
-    invoke("get_message", { folder, uid })
-      .then((msg) => {
-        messageDetailCache[cacheKey] = msg;
-        if (currentMessage?.folder === folder && currentMessage?.uid === uid) renderMessage(folder, uid, msg);
-      })
-      .catch((err) => console.error(err));
+    renderMessage(account, folder, uid, cached);
+    markMessageRead(account, folder, uid);
+    prefetchAround(uid);
     return;
   }
 
-  messageDetail.innerHTML = "<p class='placeholder'>Loading...</p>";
+  // Paint the header from the list entry right away, so the pane responds
+  // to the click while the body loads (usually from the backend's prefetch
+  // cache, so this is brief).
+  currentMessage = null;
+  const summary = folderCache[account]?.[folder]?.find((m) => m.uid === uid);
+  messageDetail.innerHTML = summary
+    ? `<div class="detail-scroll">
+        <h1 class="detail-subject">${escapeHtml(summary.subject || "(no subject)")}</h1>
+        <div class="detail-meta"><div><div class="from-addr">${escapeHtml(summary.from)}</div></div><div class="meta-date">${escapeHtml(formatLongDate(summary.date))}</div></div>
+        <p class="loading-body">Loading…</p>
+      </div>`
+    : "<p class='placeholder'>Loading…</p>";
+  // Holding J/K fires an open per row; a short pause lets the rows the user
+  // is skipping past drop out before they queue a fetch on the connection.
+  await new Promise((r) => setTimeout(r, 60));
+  if (token !== openToken) return;
   try {
-    // get_message runs alone first — IMAP only allows one command in flight
-    // per connection, so firing mark_read concurrently just makes them fight
-    // over the same session lock. Whichever loses (often this fetch, the one
-    // thing the user is actually waiting on) gets stuck behind the other's
-    // full round trip, including a cold reconnect if the session went idle.
-    // mark_read runs after, once the content is already on screen.
-    const msg = await invoke("get_message", { folder, uid });
-    messageDetailCache[cacheKey] = msg;
-    renderMessage(folder, uid, msg);
-    markMessageRead(folder, uid);
+    const msg = await invoke("get_message", { account, folder, uid });
+    messageDetailCache[key] = msg;
+    if (token !== openToken) return; // user opened something else meanwhile
+    renderMessage(account, folder, uid, msg);
+    // mark_read runs after, once the content is already on screen — IMAP
+    // allows one command in flight per connection, so running it alongside
+    // get_message would only delay the fetch the user is waiting on.
+    markMessageRead(account, folder, uid);
+    prefetchAround(uid);
   } catch (err) {
-    messageDetail.innerHTML = `<p class="error">${escapeHtml(String(err))}</p>`;
+    if (token === openToken) messageDetail.innerHTML = `<p class="error placeholder">${escapeHtml(String(err))}</p>`;
   }
 }
 
-function renderMessage(folder, uid, msg) {
-  currentMessage = { folder, uid, from: msg.from, to: msg.to, cc: msg.cc, date: msg.date, subject: msg.subject, body: msg.body, body_html: msg.body_html };
+// Asks the backend to download the next few messages into its cache (on a
+// separate background IMAP connection), so opening them is instant.
+const PREFETCH_TOP = 12;
+const PREFETCH_AHEAD = 4;
+
+function prefetch(account, folder, uids) {
+  const missing = uids.filter((uid) => !messageDetailCache[`${account}:${folder}:${uid}`]);
+  if (missing.length) invoke("prefetch_messages", { account, folder, uids: missing }).catch((err) => console.error(err));
+}
+
+function prefetchAround(uid) {
+  const messages = folderCache[currentAccount]?.[currentFolder];
+  if (!messages) return;
+  const i = messages.findIndex((m) => m.uid === uid);
+  if (i === -1) return;
+  const near = [...messages.slice(i + 1, i + 1 + PREFETCH_AHEAD), ...messages.slice(Math.max(0, i - 1), i)];
+  prefetch(currentAccount, currentFolder, near.map((m) => m.uid));
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function actionButton(id, iconName, label, key, extraClass = "") {
+  return `<button type="button" id="${id}" class="btn ${extraClass}" data-key="${key}">${icon(iconName)}${label}<kbd>${key.toUpperCase()}</kbd></button>`;
+}
+
+function renderMessage(account, folder, uid, msg) {
+  currentMessage = { account, folder, uid, from: msg.from, to: msg.to, cc: msg.cc, date: msg.date, subject: msg.subject, body: msg.body, body_html: msg.body_html };
   const bodyHtml = msg.body_html
     ? `<iframe id="message-body-frame" sandbox="allow-same-origin" title="Message body"></iframe>`
     : `<div class="body">${formatBody(msg.body)}</div>`;
   const attachmentsHtml = msg.attachments
     .map(
       (a) =>
-        `<li class="attachment-item" data-filename="${escapeHtml(a.filename)}" data-content-type="${escapeHtml(a.content_type)}" title="${escapeHtml(a.filename)} (${a.size} bytes)">
-          <span class="attachment-preview">${isImageType(a.content_type) ? "" : attachmentIcon(a.filename)}</span>
-          <button data-filename="${escapeHtml(a.filename)}">Save</button>
+        `<li class="attachment-item" data-filename="${escapeHtml(a.filename)}" data-content-type="${escapeHtml(a.content_type)}" title="${escapeHtml(a.filename)}">
+          <span class="attachment-preview">${icon("file")}</span>
+          <div class="attachment-meta"><div class="attachment-name">${escapeHtml(a.filename)}</div><div class="attachment-size">${formatSize(a.size)}</div></div>
+          <button type="button" class="icon-btn" data-filename="${escapeHtml(a.filename)}" title="Save">${icon("download")}</button>
         </li>`
     )
     .join("");
+  const moveAction =
+    folder === "ARCHIVE"
+      ? actionButton("unarchive-btn", "undo", "Unarchive", "e")
+      : folder === "TRASH"
+        ? actionButton("restore-btn", "undo", "Restore", "e")
+        : actionButton("archive-btn", "archive", "Archive", "e");
+  const deleteAction =
+    folder === "TRASH" ? actionButton("delete-forever-btn", "trash", "Delete forever", "#", "danger") : actionButton("delete-btn", "trash", "Trash", "#", "danger");
+
   messageDetail.innerHTML = `
-    <h2>${escapeHtml(msg.subject)}</h2>
-    <p><strong>From:</strong> ${escapeHtml(msg.from)}</p>
-    <p><strong>To:</strong> ${escapeHtml(msg.to)}</p>
-    ${msg.cc ? `<p><strong>Cc:</strong> ${escapeHtml(msg.cc)}</p>` : ""}
-    <p><strong>Date:</strong> ${escapeHtml(formatLocalDate(msg.date))}</p>
-    <div class="message-toolbar">
-      <button id="reply-btn">Reply</button>
-      <button id="forward-btn">Forward</button>
-      ${folder === "DRAFTS" ? `<button id="send-draft-btn">Send</button>` : ""}
-      ${
-        folder === "ARCHIVE"
-          ? `<button id="unarchive-btn">Unarchive</button>`
-          : folder === "TRASH"
-            ? `<button id="restore-btn">Restore</button>`
-            : `<button id="archive-btn">Archive</button>`
-      }
-      ${folder !== "TRASH" ? `<button id="delete-btn">Delete</button>` : `<button id="delete-forever-btn">Delete Forever</button>`}
+    <div class="detail-scroll">
+      <h1 class="detail-subject">${escapeHtml(msg.subject || "(no subject)")}</h1>
+      <div class="detail-meta">
+        <div>
+          <div class="from-addr">${escapeHtml(msg.from)}</div>
+          <div class="to-line">to <b>${escapeHtml(msg.to)}</b></div>
+          ${msg.cc ? `<div class="to-line">cc <b>${escapeHtml(msg.cc)}</b></div>` : ""}
+        </div>
+        <div class="meta-date">${escapeHtml(formatLongDate(msg.date))}</div>
+      </div>
+      ${bodyHtml}
+      ${msg.attachments.length ? `<div class="detail-section-title">${icon("paperclip")}${msg.attachments.length} attachment${msg.attachments.length > 1 ? "s" : ""}</div><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
     </div>
-    <hr/>
-    ${bodyHtml}
-    ${msg.attachments.length ? `<h3>Attachments</h3><ul class="attachment-list">${attachmentsHtml}</ul>` : ""}
+    <div class="detail-actions">
+      ${actionButton("reply-btn", "reply", "Reply", "r")}
+      ${actionButton("forward-btn", "forward", "Forward", "f")}
+      ${folder === "DRAFTS" ? actionButton("send-draft-btn", "send", "Send", "s") : ""}
+      ${moveAction}
+      ${deleteAction}
+    </div>
   `;
   document.getElementById("reply-btn").addEventListener("click", () => openCompose(replyPrefill(currentMessage)));
   document.getElementById("forward-btn").addEventListener("click", () => openCompose(forwardPrefill(currentMessage)));
-  document.getElementById("send-draft-btn")?.addEventListener("click", () => openCompose(draftPrefill(currentMessage), uid));
+  document.getElementById("send-draft-btn")?.addEventListener("click", () => openCompose(draftPrefill(currentMessage), { account, uid }));
   document.getElementById("archive-btn")?.addEventListener("click", () =>
     moveCurrentMessage("archive_message", "ARCHIVE", { inProgress: "Archiving...", done: "Archived" })
   );
@@ -428,7 +790,7 @@ function renderMessage(folder, uid, msg) {
     const filename = li.dataset.filename;
     const contentType = li.dataset.contentType;
     if (!isImageType(contentType)) return;
-    invoke("get_attachment_data", { folder, uid, filename })
+    invoke("get_attachment_data", { account, folder, uid, filename })
       .then((base64) => {
         const img = document.createElement("img");
         img.className = "attachment-thumb";
@@ -443,7 +805,7 @@ function renderMessage(folder, uid, msg) {
       const dest = await save_file_dialog(filename);
       if (!dest) return;
       try {
-        await invoke("save_attachment", { folder, uid, filename, destPath: dest });
+        await invoke("save_attachment", { account, folder, uid, filename, destPath: dest });
       } catch (err) {
         alert(String(err));
       }
@@ -483,60 +845,59 @@ function draftPrefill(msg) {
   };
 }
 
-async function markMessageRead(folder, uid) {
+async function markMessageRead(account, folder, uid) {
   // Only skip the round trip when we positively know it's already read —
   // the message may not be in the cache at all (e.g. a stale on-disk cache
   // that a background refresh hasn't replaced yet).
-  const cached = folderCache[folder]?.find((m) => m.uid === uid);
+  const cached = folderCache[account]?.[folder]?.find((m) => m.uid === uid);
   if (cached && !cached.unread) return;
 
-  try {
-    await invoke("mark_read", { folder, uid });
-  } catch (err) {
-    console.error(err);
-    return;
-  }
+  // Optimistic: the row stops looking unread immediately; the server catches up.
   if (cached) {
     cached.unread = false;
-    persistFolderCache(folder);
+    persistFolderCache(account, folder);
   }
-  if (folder === "INBOX") updateUnreadBadge(folderCache.INBOX ?? []);
-  const item = messageList.querySelector(`.message-item[data-uid="${uid}"]`);
-  if (item) {
-    item.classList.remove("unread");
-    item.querySelector(".unread-dot")?.remove();
+  renderAccountSwitcher();
+  if (isViewing(account, folder)) messageList.querySelector(`.message-item[data-uid="${uid}"]`)?.classList.remove("unread");
+  try {
+    await invoke("mark_read", { account, folder, uid });
+  } catch (err) {
+    console.error(err);
   }
 }
 
-async function checkForNewMail() {
+async function checkForNewMail(account) {
   let messages;
   try {
-    messages = await invoke("list_messages", { folder: "INBOX" });
+    messages = await invoke("list_messages", { account, folder: "INBOX" });
   } catch (err) {
     console.error(err);
     return;
   }
-  folderCache.INBOX = messages;
-  persistFolderCache("INBOX");
-  if (currentFolder === "INBOX") renderMessageList("INBOX", messages);
-  else updateUnreadBadge(messages);
+  if (!accounts.some((a) => a.username === account)) return; // removed meanwhile
+  folders(account).INBOX = messages;
+  persistFolderCache(account, "INBOX");
+  if (isViewing(account, "INBOX")) renderMessageList();
+  else renderAccountSwitcher();
 
   const unread = messages.filter((m) => m.unread);
-  if (knownUnreadUids) {
-    for (const m of unread) {
-      if (!knownUnreadUids.has(m.uid)) notifyNewMail(m);
-    }
+  const known = knownUnreadUids[account];
+  if (known) {
+    const fresh = unread.filter((m) => !known.has(m.uid));
+    fresh.forEach((m) => notifyNewMail(account, m));
+    prefetch(account, "INBOX", fresh.slice(0, PREFETCH_TOP).map((m) => m.uid));
   }
-  knownUnreadUids = new Set(unread.map((m) => m.uid));
+  knownUnreadUids[account] = new Set(unread.map((m) => m.uid));
 }
 
-async function notifyNewMail(message) {
+async function notifyNewMail(account, message) {
   try {
     const { isPermissionGranted, requestPermission, sendNotification } = window.__TAURI__.notification;
     let granted = await isPermissionGranted();
     if (!granted) granted = (await requestPermission()) === "granted";
     if (!granted) return;
-    sendNotification({ title: message.from, body: message.subject || "(no subject)" });
+    const subject = message.subject || "(no subject)";
+    sendNotification({ title: message.from, body: accounts.length > 1 ? `${subject}\n→ ${account}` : subject });
   } catch (err) {
     console.error(err);
   }
@@ -547,33 +908,43 @@ async function save_file_dialog(defaultName) {
   return await save({ defaultPath: defaultName });
 }
 
-// Compose modal
+// ---- Compose ----------------------------------------------------------------
+
 const composeModal = document.getElementById("compose-modal");
 const composeForm = document.getElementById("compose-form");
+const composeFrom = document.getElementById("compose-from");
 const attachmentListEl = document.getElementById("attachment-list");
 
 // Set while editing an existing draft (via the Send button on a DRAFTS
-// message) so submitCompose knows to remove the superseded draft afterward
-// instead of leaving a stale duplicate behind. null for a plain new message.
-let editingDraftUid = null;
+// message) to { account, uid }, so submitCompose knows to remove the
+// superseded draft afterward instead of leaving a stale duplicate behind.
+// null for a plain new message.
+let editingDraft = null;
 
-function openCompose(prefill = {}, draftUid = null) {
-  editingDraftUid = draftUid;
+function openCompose(prefill = {}, draft = null) {
+  editingDraft = draft;
   attachmentPaths = [];
   attachmentListEl.innerHTML = "";
   composeForm.reset();
+  composeFrom.innerHTML = usableAccounts()
+    .map((a) => `<option value="${escapeHtml(a.username)}">${escapeHtml(a.username)}</option>`)
+    .join("");
+  composeFrom.value = draft?.account ?? currentAccount;
   if (prefill.to) composeForm.elements.to.value = prefill.to;
   if (prefill.cc) composeForm.elements.cc.value = prefill.cc;
   if (prefill.subject) composeForm.elements.subject.value = prefill.subject;
   if (prefill.body) composeForm.elements.body.value = prefill.body;
   composeModal.classList.remove("hidden");
+  composeForm.elements[prefill.to ? "body" : "to"].focus();
+  if (prefill.to) composeForm.elements.body.setSelectionRange(0, 0);
+}
+
+function closeCompose() {
+  composeModal.classList.add("hidden");
 }
 
 document.getElementById("compose-btn").addEventListener("click", () => openCompose());
-
-document.getElementById("cancel-compose-btn").addEventListener("click", () => {
-  composeModal.classList.add("hidden");
-});
+document.getElementById("cancel-compose-btn").addEventListener("click", closeCompose);
 
 document.getElementById("attachment-picker").addEventListener("click", async () => {
   const selected = await open({ multiple: true });
@@ -581,14 +952,12 @@ document.getElementById("attachment-picker").addEventListener("click", async () 
   const paths = Array.isArray(selected) ? selected : [selected];
   for (const p of paths) {
     attachmentPaths.push(p);
-    const filename = p.split("/").pop();
+    const filename = p.split(/[\\/]/).pop();
     const li = document.createElement("li");
     li.className = "attachment-item";
     li.title = filename;
-    const preview = document.createElement("span");
-    preview.className = "attachment-preview";
-    preview.textContent = attachmentIcon();
-    li.append(preview);
+    li.innerHTML = `<span class="attachment-preview">${icon("file")}</span><div class="attachment-meta"><div class="attachment-name"></div></div>`;
+    li.querySelector(".attachment-name").textContent = filename;
     attachmentListEl.appendChild(li);
 
     if (isImageType(guessImageType(filename))) {
@@ -597,7 +966,7 @@ document.getElementById("attachment-picker").addEventListener("click", async () 
           const img = document.createElement("img");
           img.className = "attachment-thumb";
           img.src = `data:${guessImageType(filename)};base64,${base64}`;
-          preview.replaceChildren(img);
+          li.querySelector(".attachment-preview").replaceChildren(img);
         })
         .catch((err) => console.error(err));
     }
@@ -615,7 +984,9 @@ function guessImageType(filename) {
 // progress and outcome surface via the bottom-left status toast.
 function submitCompose(shouldSend) {
   const form = new FormData(composeForm);
+  const account = form.get("from");
   const payload = {
+    account,
     to: form.get("to"),
     cc: form.get("cc") || "",
     subject: form.get("subject") || "",
@@ -626,21 +997,21 @@ function submitCompose(shouldSend) {
   // it (a draft has no envelope, and writing it into a header would defeat
   // the point of Bcc once the draft is later sent or read back).
   if (shouldSend) payload.bcc = form.get("bcc") || "";
-  const supersededDraftUid = editingDraftUid;
-  editingDraftUid = null;
-  composeModal.classList.add("hidden");
+  const supersededDraft = editingDraft;
+  editingDraft = null;
+  closeCompose();
   const inProgress = shouldSend ? "Sending..." : "Saving draft...";
   const done = shouldSend ? "Sent" : "Draft saved";
   showToast(inProgress);
   invoke(shouldSend ? "send_email" : "save_draft", payload)
     .then(() => {
       showToast(done, { autoHideMs: 2000 });
-      invalidateFolder(shouldSend ? "SENT" : "DRAFTS");
+      invalidateFolder(account, shouldSend ? "SENT" : "DRAFTS");
       // A fresh draft/sent message was just appended above — remove the one
       // this replaced instead of leaving a stale duplicate sitting in Drafts.
-      if (supersededDraftUid != null) {
-        invoke("permanently_delete_message", { folder: "DRAFTS", uid: supersededDraftUid })
-          .then(() => invalidateFolder("DRAFTS"))
+      if (supersededDraft) {
+        invoke("permanently_delete_message", { account: supersededDraft.account, folder: "DRAFTS", uid: supersededDraft.uid })
+          .then(() => invalidateFolder(supersededDraft.account, "DRAFTS"))
           .catch((err) => console.error(err));
       }
     })
@@ -656,32 +1027,109 @@ document.getElementById("save-draft-btn").addEventListener("click", () => {
   submitCompose(false);
 });
 
-function isImageType(contentType) {
-  return /^image\//.test(contentType || "");
+// ---- Keyboard shortcuts -----------------------------------------------------
+
+function isTypingTarget(el) {
+  return el instanceof HTMLElement && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
 }
 
-function attachmentIcon() {
-  return "\u{1F4CE}"; // 📎
+document.addEventListener("keydown", (e) => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (e.key === "Escape") {
+    if (!accountMenu.classList.contains("hidden")) toggleAccountMenu(false);
+    else if (!accountsModal.classList.contains("hidden")) accountsModal.classList.add("hidden");
+    else if (document.activeElement === searchInput) {
+      searchInput.value = "";
+      searchQuery = "";
+      searchInput.blur();
+      renderMessageList();
+    }
+    return;
+  }
+  if (mod && e.key === "Enter" && !composeModal.classList.contains("hidden")) {
+    e.preventDefault();
+    composeForm.requestSubmit();
+    return;
+  }
+  if (appView.classList.contains("hidden") || !composeModal.classList.contains("hidden") || !accountsModal.classList.contains("hidden")) return;
+
+  if (mod && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+    return;
+  }
+  if (mod && /^[1-9]$/.test(e.key)) {
+    const target = accounts[Number(e.key) - 1];
+    if (target) {
+      e.preventDefault();
+      switchAccount(target.username);
+    }
+    return;
+  }
+  if (mod || e.altKey || isTypingTarget(e.target)) return;
+
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (key === "c") openCompose();
+  else if (key === "j" || key === "ArrowDown") moveSelection(1);
+  else if (key === "k" || key === "ArrowUp") moveSelection(-1);
+  else if (key === "/") searchInput.focus();
+  else {
+    const btn = messageDetail.querySelector(`.detail-actions [data-key="${CSS.escape(key)}"]`);
+    if (!btn) return;
+    btn.click();
+  }
+  e.preventDefault();
+});
+
+// ---- Rendering helpers ------------------------------------------------------
+
+function isImageType(contentType) {
+  return /^image\//.test(contentType || "");
 }
 
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str ?? "";
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, "&quot;");
 }
+
+// Links in mail content must go through the OS opener: the webview ignores
+// target="_blank" and would otherwise navigate (or do nothing).
+function openExternal(href) {
+  if (!/^(https?:|mailto:)/i.test(href || "")) return;
+  invoke("open_link", { url: href }).catch((err) => showToast(`Couldn't open link: ${err}`, { autoHideMs: 4000 }));
+}
+
+messageDetail.addEventListener(
+  "click",
+  (e) => {
+    const a = e.target.closest("a[href]");
+    if (!a) return;
+    e.preventDefault();
+    openExternal(a.getAttribute("href"));
+  },
+  true
+);
 
 // HTML mail bodies come pre-sanitized (scripts/handlers stripped server-side)
 // but still carry the sender's own CSS, so they're rendered in a sandboxed
 // iframe to keep that styling from leaking into the app UI. No allow-scripts
 // means embedded/inline JS can never execute regardless of sanitization.
 // allow-same-origin only lets this parent frame read the iframe's DOM to size
-// it and intercept link clicks — safe to combine with no-scripts.
+// it — safe to combine with no-scripts. Without allow-scripts WebKit won't run
+// listeners we attach inside the iframe either, so link clicks can't be caught
+// here: links target the iframe itself (<base target="_self">) and the Rust
+// external_links plugin cancels that navigation and opens the URL in the OS.
 function renderHtmlBody(iframe, html) {
-  const [bg, color] = isDarkActive() ? ["#1c1c1f", "#ecebee"] : ["#ffffff", "#1a1a1e"];
-  const wrapped = `<!doctype html><html><head><base target="_blank"><meta charset="utf-8">
+  const css = getComputedStyle(document.documentElement);
+  const [bg, color, font, size] = ["--bg", "--text", "--font-reading", "--reading-size"].map((v) => css.getPropertyValue(v).trim());
+  const fontsHref = new URL("fonts/fonts.css", document.baseURI).href;
+  const wrapped = `<!doctype html><html><head><base target="_self"><meta charset="utf-8">
+    <link rel="stylesheet" href="${fontsHref}">
     <style>
       html, body { height: auto !important; min-height: 0 !important; overflow: visible !important; }
-      body { margin: 0; font-family: inherit; color: ${color}; background: ${bg}; word-wrap: break-word; }
+      body { margin: 0; font-family: ${font}; font-size: ${size}; line-height: 1.6; color: ${color}; background: ${bg}; word-wrap: break-word; }
       /* Marketing emails often size their outer wrapper for a fixed preview pane
          (height/max-height + overflow:hidden); left alone that clips the real
          content to a sliver of the message. Force any direct child of body to
@@ -699,15 +1147,6 @@ function renderHtmlBody(iframe, html) {
     resize();
     new ResizeObserver(resize).observe(doc.documentElement);
     doc.querySelectorAll("img").forEach((img) => img.addEventListener("load", resize));
-    doc.querySelectorAll("a[href]").forEach((a) => {
-      a.addEventListener("click", (e) => {
-        e.preventDefault();
-        const href = a.getAttribute("href") || "";
-        if (/^(https?:|mailto:)/i.test(href)) {
-          window.__TAURI__.opener.openUrl(href).catch((err) => console.error(err));
-        }
-      });
-    });
   });
   iframe.srcdoc = wrapped;
 }
@@ -716,8 +1155,8 @@ function renderHtmlBody(iframe, html) {
 // only ever insert markup we generated ourselves (never raw user/email content).
 // Sentinel uses Unicode Private-Use-Area code points, which can't appear in
 // normal text, so stashed placeholders can never collide with real content.
-const PLACEHOLDER_START = "";
-const PLACEHOLDER_END = "";
+const PLACEHOLDER_START = "\uE000";
+const PLACEHOLDER_END = "\uE001";
 
 function formatBody(raw) {
   let text = escapeHtml(raw);

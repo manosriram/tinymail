@@ -1,0 +1,50 @@
+/* Prototype 5 — "Native Mono"
+   Feels like a built-in desktop app: the OS system font (SF Pro on macOS,
+   Segoe UI on Windows), segmented folder control, filled list selection.
+   Strictly black, white and gray — no accent hue at all. */
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f5f5f7;
+  --bg-raised: #ffffff;
+  --bg-hover: #f0f0f2;
+  --bg-selected: #1d1d1f;
+  --border: #e3e3e6;
+  --text: #1d1d1f;
+  --text-muted: #515154;
+  --text-faint: #6e6e73;
+  --accent: #1d1d1f;
+  --accent-ink: #ffffff;
+  --accent-fg: #1d1d1f;
+  --radius: 7px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, Roboto, sans-serif;
+}
+:root[data-theme="dark"] {
+  --bg: #161617;
+  --bg-subtle: #1d1d1f;
+  --bg-raised: #222224;
+  --bg-hover: #2a2a2c;
+  --bg-selected: #f5f5f7;
+  --border: #2f2f32;
+  --text: #f5f5f7;
+  --text-muted: #b0b0b5;
+  --text-faint: #8e8e93;
+  --accent: #f5f5f7;
+  --accent-ink: #1d1d1f;
+  --accent-fg: #f5f5f7;
+}
+body { font-feature-settings: normal; }
+
+.folder-tabs { height: 52px; border-bottom: 1px solid var(--border); }
+.folder-tabs .tabs { height: auto; padding: 3px; gap: 2px; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 9px; }
+.folder-btn { height: 28px; padding: 0 0.9rem; border: none; margin: 0; border-radius: 6px; font-size: 13px; }
+.folder-btn.active { background: var(--bg-raised); color: var(--text); border: none; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+:root[data-theme="dark"] .folder-btn.active { background: var(--bg-hover); }
+
+.message-list { padding: 6px; }
+.message-item { border: none; border-radius: 8px; margin-bottom: 2px; padding: 0.7rem 0.9rem 0.7rem 0.7rem; }
+.message-item.active { border: none; color: var(--accent-ink); }
+.message-item.active .from, .message-item.active .subject, .message-item.active .date { color: var(--accent-ink); }
+.message-item.active .subject { opacity: 0.85; }
+.message-item.unread .unread-dot { background: var(--text); }
+.message-item.active.unread .unread-dot { background: var(--accent-ink); }
+.message-item.unread .date { color: var(--text); }

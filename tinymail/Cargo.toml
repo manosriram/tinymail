@@ -1,6 +1,6 @@
 [package]
 name = "tinymail"
-version = "1.0.3"
+version = "1.0.4"
 description = "A minimal email client"
 authors = ["you"]
 edition = "2021"

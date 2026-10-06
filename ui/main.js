@@ -1069,6 +1069,21 @@ function escapeHtml(str) {
   return div.innerHTML.replace(/"/g, "&quot;");
 }
 
+// Links in mail content must go through the OS opener: the webview ignores
+// target="_blank" and would otherwise navigate (or do nothing).
+function openExternal(href) {
+  if (/^(https?:|mailto:)/i.test(href || "")) {
+    window.__TAURI__.opener.openUrl(href).catch((err) => console.error(err));
+  }
+}
+
+messageDetail.addEventListener("click", (e) => {
+  const a = e.target.closest("a[href]");
+  if (!a) return;
+  e.preventDefault();
+  openExternal(a.getAttribute("href"));
+});
+
 // HTML mail bodies come pre-sanitized (scripts/handlers stripped server-side)
 // but still carry the sender's own CSS, so they're rendered in a sandboxed
 // iframe to keep that styling from leaking into the app UI. No allow-scripts
@@ -1101,14 +1116,11 @@ function renderHtmlBody(iframe, html) {
     resize();
     new ResizeObserver(resize).observe(doc.documentElement);
     doc.querySelectorAll("img").forEach((img) => img.addEventListener("load", resize));
-    doc.querySelectorAll("a[href]").forEach((a) => {
-      a.addEventListener("click", (e) => {
-        e.preventDefault();
-        const href = a.getAttribute("href") || "";
-        if (/^(https?:|mailto:)/i.test(href)) {
-          window.__TAURI__.opener.openUrl(href).catch((err) => console.error(err));
-        }
-      });
+    doc.addEventListener("click", (e) => {
+      const a = e.target.closest?.("a[href]");
+      if (!a) return;
+      e.preventDefault();
+      openExternal(a.getAttribute("href"));
     });
   });
   iframe.srcdoc = wrapped;

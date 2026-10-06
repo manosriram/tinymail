@@ -76,7 +76,7 @@
     app: { getVersion: async () => "1.0.3" },
     window: { getCurrentWindow: () => ({ show: async () => {}, setFocus: async () => {} }) },
     notification: { isPermissionGranted: async () => false, requestPermission: async () => "denied", sendNotification: () => {} },
-    opener: { openUrl: async () => {} },
+    opener: { openUrl: async (u) => { (window.__opened ??= []).push(u); } },
   };
 
   if (params.get("open") !== "0") {

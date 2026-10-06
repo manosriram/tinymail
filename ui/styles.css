@@ -251,6 +251,9 @@ kbd {
 .message-item .subject { margin-top: 0.2rem; font-size: 13.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-item.unread .subject { color: var(--text); font-weight: 500; }
 
+.list-banner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 1rem; font-size: 13px; color: var(--text-muted); border-bottom: 1px solid var(--border); background: var(--bg-subtle); position: sticky; top: 0; z-index: 1; }
+.list-banner .btn { height: 28px; font-size: 0.8rem; }
+
 /* Message detail */
 .message-detail { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .detail-empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 0.6rem; color: var(--text-faint); font-size: 0.85rem; }

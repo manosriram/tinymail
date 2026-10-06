@@ -42,7 +42,7 @@
   const sent = [
     { uid: 51, from: "priya@northwind.io", to: "daniel.okafor@northwind.io", subject: "Re: Roadmap review", date: daysAgo(1), unread: false, body: "Sounds good — see you Thursday." },
   ];
-  const mailbox = { INBOX: inbox, SENT: sent, DRAFTS: [], ARCHIVE: [], TRASH: [] };
+  const mailbox = { INBOX: inbox, SENT: sent, DRAFTS: [], ARCHIVE: [], TRASH: [{ uid: 7, from: "spam@example.com", subject: "You won!", date: daysAgo(2), unread: false, body: "No." }] };
   const gmailInbox = [
     { uid: 9, from: "mom@example.com", subject: "Sunday dinner?", date: hoursAgo(3), unread: true, body: "Are you coming over on Sunday?" },
   ];
@@ -67,6 +67,8 @@
       const m = find(account, folder, uid);
       return { from: m.from, to: m.to ?? account, cc: m.cc ?? "", subject: m.subject, date: new Date(m.date).toISOString(), body: m.body, body_html: m.html ? receiptHtml : undefined, attachments: m.attachments ?? [] };
     },
+    open_link: ({ url }) => { (window.__opened ??= []).push(url); },
+    empty_trash: ({ account }) => { mailbox.TRASH.length = 0; },
     mark_read: ({ account, folder, uid }) => { const m = find(account, folder, uid); if (m) m.unread = false; },
   };
 

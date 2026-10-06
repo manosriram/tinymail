@@ -175,6 +175,30 @@ async fn permanently_delete_message(account: String, folder: String, uid: u32, s
 }
 
 #[tauri::command]
+async fn empty_trash(account: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let state = state.inner().clone();
+    blocking(move || {
+        let (cache, acct, pw) = state.resolve(&account)?;
+        mail::empty_trash(&cache, &acct, &pw)
+    })
+    .await
+}
+
+/// Opens a link from mail content in the default browser / mail app. Done in
+/// Rust (not via the JS opener plugin) so it doesn't depend on the webview's
+/// global plugin object or URL scope, and only ever opens http(s)/mailto.
+#[tauri::command]
+fn open_link(url: String, app: tauri::AppHandle) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !["http://", "https://", "mailto:"].iter().any(|p| lower.starts_with(p)) {
+        return Err(format!("unsupported link: {url}"));
+    }
+    tauri_plugin_opener::OpenerExt::opener(&app)
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn save_attachment(account: String, folder: String, uid: u32, filename: String, dest_path: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
@@ -243,6 +267,8 @@ pub fn run() {
             unarchive_message,
             restore_message,
             permanently_delete_message,
+            empty_trash,
+            open_link,
             save_attachment,
             get_attachment_data,
             read_file_base64,

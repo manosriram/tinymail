@@ -62,13 +62,17 @@ impl BodyCache {
         raw
     }
 
+    fn clear_mailbox(&mut self, mailbox: &str) {
+        self.map.retain(|(m, _), _| m != mailbox);
+        self.order.retain(|(m, _)| m != mailbox);
+        self.bytes = self.map.values().map(|r| r.len()).sum();
+    }
+
     /// Drops a mailbox's cached messages if the server reset its UIDs.
     fn check_uid_validity(&mut self, mailbox: &str, uid_validity: Option<u32>) {
         let Some(v) = uid_validity else { return };
         if self.uid_validity.insert(mailbox.to_string(), v).is_some_and(|old| old != v) {
-            self.map.retain(|(m, _), _| m != mailbox);
-            self.order.retain(|(m, _)| m != mailbox);
-            self.bytes = self.map.values().map(|r| r.len()).sum();
+            self.clear_mailbox(mailbox);
         }
     }
 }
@@ -471,6 +475,22 @@ pub fn permanently_delete_message(cache: &SessionCache, account: &Account, passw
         session.expunge().map_err(|e| e.to_string())?;
         Ok(())
     })
+}
+
+/// Permanently removes every message in the account's Trash folder.
+pub fn empty_trash(cache: &SessionCache, account: &Account, password: &str) -> Result<(), String> {
+    let mailbox_name = account.trash_folder.clone();
+    with_session(&cache.fg, account, password, |session, selected| {
+        let mailbox = session.select(&mailbox_name).map_err(|e| e.to_string())?;
+        *selected = mailbox_name.clone();
+        if mailbox.exists > 0 {
+            session.store("1:*", "+FLAGS (\\Deleted)").map_err(|e| e.to_string())?;
+            session.expunge().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })?;
+    cache.bodies.lock().unwrap().clear_mailbox(&mailbox_name);
+    Ok(())
 }
 
 pub fn save_attachment(

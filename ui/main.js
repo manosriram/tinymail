@@ -510,6 +510,13 @@ function renderMessageList() {
   }
   const activeUid = currentMessage?.account === currentAccount && currentMessage?.folder === currentFolder ? currentMessage.uid : null;
   messageList.innerHTML = "";
+  if (currentFolder === "TRASH" && !q) {
+    const bar = document.createElement("div");
+    bar.className = "list-banner";
+    bar.innerHTML = `<span>${messages.length} message${messages.length === 1 ? "" : "s"} in Trash</span><button type="button" class="btn danger">${icon("trash")}Empty Trash</button>`;
+    bar.querySelector("button").addEventListener("click", emptyTrash);
+    messageList.appendChild(bar);
+  }
   for (const m of shown) {
     const item = document.createElement("div");
     item.className = `message-item${m.unread ? " unread" : ""}${m.uid === activeUid ? " active" : ""}`;
@@ -574,6 +581,24 @@ async function loadFolder(account, folder, { force = false, silent = false } = {
   } finally {
     refreshBtn.classList.remove("spinning");
   }
+}
+
+// Optimistic like moveCurrentMessage: the list empties at once and the
+// server catches up; on failure the folder is reloaded to show what's left.
+async function emptyTrash() {
+  const account = currentAccount;
+  if (!(await confirm("Permanently delete all messages in Trash? This cannot be undone.", { title: "tinymail", kind: "warning" }))) return;
+  clearDetail();
+  folders(account).TRASH = [];
+  persistFolderCache(account, "TRASH");
+  if (isViewing(account, "TRASH")) renderMessageList();
+  showToast("Emptying Trash...");
+  invoke("empty_trash", { account })
+    .then(() => showToast("Trash emptied", { autoHideMs: 2000 }))
+    .catch((err) => {
+      showToast(`Failed: ${err}`, { autoHideMs: 4000 });
+      loadFolder(account, "TRASH", { force: true });
+    });
 }
 
 function invalidateFolder(account, folder) {
@@ -1072,17 +1097,20 @@ function escapeHtml(str) {
 // Links in mail content must go through the OS opener: the webview ignores
 // target="_blank" and would otherwise navigate (or do nothing).
 function openExternal(href) {
-  if (/^(https?:|mailto:)/i.test(href || "")) {
-    window.__TAURI__.opener.openUrl(href).catch((err) => console.error(err));
-  }
+  if (!/^(https?:|mailto:)/i.test(href || "")) return;
+  invoke("open_link", { url: href }).catch((err) => showToast(`Couldn't open link: ${err}`, { autoHideMs: 4000 }));
 }
 
-messageDetail.addEventListener("click", (e) => {
-  const a = e.target.closest("a[href]");
-  if (!a) return;
-  e.preventDefault();
-  openExternal(a.getAttribute("href"));
-});
+messageDetail.addEventListener(
+  "click",
+  (e) => {
+    const a = e.target.closest("a[href]");
+    if (!a) return;
+    e.preventDefault();
+    openExternal(a.getAttribute("href"));
+  },
+  true
+);
 
 // HTML mail bodies come pre-sanitized (scripts/handlers stripped server-side)
 // but still carry the sender's own CSS, so they're rendered in a sandboxed
@@ -1116,12 +1144,16 @@ function renderHtmlBody(iframe, html) {
     resize();
     new ResizeObserver(resize).observe(doc.documentElement);
     doc.querySelectorAll("img").forEach((img) => img.addEventListener("load", resize));
-    doc.addEventListener("click", (e) => {
-      const a = e.target.closest?.("a[href]");
-      if (!a) return;
-      e.preventDefault();
-      openExternal(a.getAttribute("href"));
-    });
+    doc.addEventListener(
+      "click",
+      (e) => {
+        const a = e.target.closest?.("a[href]");
+        if (!a) return;
+        e.preventDefault();
+        openExternal(a.getAttribute("href"));
+      },
+      true
+    );
   });
   iframe.srcdoc = wrapped;
 }

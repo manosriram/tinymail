@@ -23,6 +23,8 @@ const ICON_PATHS = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
   file: '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><path d="M14 2v6h6"/>',
   mail: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>',
+  mailOpen: '<path d="M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6Z"/><path d="m22 10-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
 };
 
 function icon(name) {
@@ -94,6 +96,8 @@ let openToken = 0; // bumped per message open, so a slow fetch can't overwrite a
 const folderCache = {}; // account -> folder -> messages[], avoids refetching on every nav click
 const messageDetailCache = {}; // "account:folder:uid" -> last-fetched MessageDetail, so reopening a message already viewed this session is instant
 const knownUnreadUids = {}; // account -> Set of unread INBOX uids; baseline for new-mail notifications
+const selectedUids = new Set(); // multi-selected rows in the current account + folder, for bulk actions
+let selectionAnchor = null; // uid of the last row toggled, the fixed end of a Shift-click range
 
 const FOLDERS = ["INBOX", "SENT", "DRAFTS", "ARCHIVE", "TRASH"];
 const ACTIVE_ACCOUNT_KEY = "tinymail-active-account";
@@ -243,6 +247,7 @@ function switchAccount(username) {
   currentMessage = null;
   searchQuery = "";
   searchInput.value = "";
+  clearSelection({ render: false });
   renderAccountSwitcher();
   openFolder(currentFolder);
 }
@@ -439,6 +444,7 @@ document.querySelectorAll(".folder-btn").forEach((btn) => {
     document.querySelectorAll(".folder-btn").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     currentFolder = btn.dataset.folder;
+    clearSelection({ render: false });
     openFolder(currentFolder);
   });
 });
@@ -508,30 +514,192 @@ function renderMessageList() {
 
   const q = searchQuery.trim().toLowerCase();
   const shown = q ? messages.filter((m) => m.from.toLowerCase().includes(q) || m.subject.toLowerCase().includes(q)) : messages;
+  // Bulk actions only ever apply to rows the user can see: drop selected
+  // messages that a refresh removed or the search now hides.
+  const shownUids = new Set(shown.map((m) => m.uid));
+  for (const uid of selectedUids) if (!shownUids.has(uid)) selectedUids.delete(uid);
   if (shown.length === 0) {
+    messageList.classList.remove("selecting");
     messageList.innerHTML = `<p class='placeholder'>${q ? "No matching messages" : "No messages"}</p>`;
     return;
   }
   const activeUid = currentMessage?.account === currentAccount && currentMessage?.folder === currentFolder ? currentMessage.uid : null;
   messageList.innerHTML = "";
-  if (currentFolder === "TRASH" && !q) {
-    const bar = document.createElement("div");
-    bar.className = "list-banner";
-    bar.innerHTML = `<span>${messages.length} message${messages.length === 1 ? "" : "s"} in Trash</span><button type="button" class="btn danger">${icon("trash")}Empty Trash</button>`;
-    bar.querySelector("button").addEventListener("click", emptyTrash);
-    messageList.appendChild(bar);
-  }
   for (const m of shown) {
     const item = document.createElement("div");
     item.className = `message-item${m.unread ? " unread" : ""}${m.uid === activeUid ? " active" : ""}`;
     item.dataset.uid = String(m.uid);
-    item.innerHTML = `<span class="unread-dot"></span>
+    item.innerHTML = `<span class="mark"><span class="unread-dot"></span><span class="select-box" role="checkbox" title="Select">${icon("check")}</span></span>
       <div>
         <div class="message-row"><span class="from">${escapeHtml(m.from)}</span><span class="date">${escapeHtml(formatShortDate(m.date))}</span></div>
         <div class="subject">${escapeHtml(m.subject || "(no subject)")}</div>
       </div>`;
-    item.addEventListener("click", () => selectMessageItem(item));
+    item.querySelector(".select-box").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (e.shiftKey) selectRange(item);
+      else toggleSelected(Number(item.dataset.uid));
+    });
+    item.addEventListener("click", (e) => {
+      if (e.shiftKey) selectRange(item);
+      else if (e.metaKey || e.ctrlKey) toggleSelected(Number(item.dataset.uid));
+      else selectMessageItem(item);
+    });
     messageList.appendChild(item);
+  }
+  renderSelection();
+}
+
+// ---- Multi-select & bulk actions --------------------------------------------
+
+// Syncs row checkboxes and the banner at the top of the list with
+// `selectedUids` in place, so toggling a row doesn't rebuild (and re-scroll)
+// the whole list.
+function renderSelection() {
+  const items = [...messageList.querySelectorAll(".message-item")];
+  items.forEach((el) => {
+    const on = selectedUids.has(Number(el.dataset.uid));
+    el.classList.toggle("selected", on);
+    el.querySelector(".select-box").setAttribute("aria-checked", String(on));
+  });
+  messageList.classList.toggle("selecting", selectedUids.size > 0);
+
+  messageList.querySelector(".list-banner")?.remove();
+  let bar = null;
+  if (selectedUids.size > 0) {
+    bar = bulkBar(items.length);
+  } else if (currentFolder === "TRASH" && !searchQuery.trim()) {
+    const count = folderCache[currentAccount]?.TRASH?.length ?? 0;
+    bar = document.createElement("div");
+    bar.className = "list-banner";
+    bar.innerHTML = `<span>${plural(count, "message")} in Trash</span><button type="button" class="btn danger">${icon("trash")}Empty Trash</button>`;
+    bar.querySelector("button").addEventListener("click", emptyTrash);
+  }
+  if (bar) messageList.prepend(bar);
+}
+
+function bulkBar(shownCount) {
+  const count = selectedUids.size;
+  const all = count === shownCount;
+  const messages = folderCache[currentAccount]?.[currentFolder] ?? [];
+  const anyUnread = messages.some((m) => m.unread && selectedUids.has(m.uid));
+  const bulkButton = (action, iconName, title, key = "", extraClass = "") =>
+    `<button type="button" class="icon-btn ${extraClass}" data-bulk="${action}"${key ? ` data-key="${key}"` : ""} title="${title}${key ? ` (${key.toUpperCase()})` : ""}">${icon(iconName)}</button>`;
+  const moveAction =
+    currentFolder === "ARCHIVE"
+      ? bulkButton("unarchive", "undo", "Unarchive", "e")
+      : currentFolder === "TRASH"
+        ? bulkButton("restore", "undo", "Restore to Inbox", "e")
+        : bulkButton("archive", "archive", "Archive", "e");
+  const deleteAction =
+    currentFolder === "TRASH" ? bulkButton("delete-forever", "trash", "Delete forever", "#", "danger") : bulkButton("delete", "trash", "Trash", "#", "danger");
+  const readAction = anyUnread ? bulkButton("read", "mailOpen", "Mark as read") : bulkButton("unread", "mail", "Mark as unread");
+
+  const bar = document.createElement("div");
+  bar.className = "list-banner bulk-bar";
+  bar.innerHTML = `
+    <label class="bulk-count">
+      <span class="select-box${all ? " on" : " partial"}" role="checkbox" aria-checked="${all ? "true" : "mixed"}" title="${all ? "Deselect all" : "Select all"}">${icon("check")}</span>
+      <span>${count} selected</span>
+    </label>
+    <div class="bulk-actions">
+      ${moveAction}
+      ${deleteAction}
+      ${readAction}
+      <button type="button" class="icon-btn" data-bulk="clear" title="Clear selection (Esc)">${icon("x")}</button>
+    </div>`;
+  bar.querySelector(".bulk-count").addEventListener("click", () => (all ? clearSelection() : selectAllShown()));
+  bar.querySelectorAll("[data-bulk]").forEach((btn) => btn.addEventListener("click", () => runBulkAction(btn.dataset.bulk)));
+  return bar;
+}
+
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function toggleSelected(uid) {
+  if (selectedUids.has(uid)) selectedUids.delete(uid);
+  else selectedUids.add(uid);
+  selectionAnchor = uid;
+  renderSelection();
+}
+
+// Shift-click: selects every visible row between the anchor and `item`.
+function selectRange(item) {
+  const items = [...messageList.querySelectorAll(".message-item")];
+  const to = items.indexOf(item);
+  let from = items.findIndex((el) => Number(el.dataset.uid) === selectionAnchor);
+  if (from === -1) from = Math.max(0, items.findIndex((el) => el.classList.contains("active")));
+  const [lo, hi] = from < to ? [from, to] : [to, from];
+  items.slice(lo, hi + 1).forEach((el) => selectedUids.add(Number(el.dataset.uid)));
+  selectionAnchor = Number(item.dataset.uid);
+  renderSelection();
+}
+
+function selectAllShown() {
+  messageList.querySelectorAll(".message-item").forEach((el) => selectedUids.add(Number(el.dataset.uid)));
+  renderSelection();
+}
+
+function clearSelection({ render = true } = {}) {
+  selectedUids.clear();
+  selectionAnchor = null;
+  if (render) renderSelection();
+}
+
+async function runBulkAction(action) {
+  const account = currentAccount;
+  const folder = currentFolder;
+  const uids = [...selectedUids];
+  if (uids.length === 0) return;
+  const n = plural(uids.length, "message");
+  const ask = (question) => confirm(question, { title: "tinymail", kind: "warning" });
+
+  switch (action) {
+    case "clear":
+      return clearSelection();
+    case "read":
+    case "unread":
+      clearSelection();
+      return setReadState(account, folder, uids, action === "unread");
+    case "archive":
+      return moveMessages(account, folder, uids, "archive_message", "ARCHIVE", { inProgress: `Archiving ${n}...`, done: `Archived ${n}` });
+    case "unarchive":
+      if (!(await ask(`Unarchive ${n}?`))) return;
+      return moveMessages(account, folder, uids, "unarchive_message", "INBOX", { inProgress: `Unarchiving ${n}...`, done: `Unarchived ${n}` });
+    case "restore":
+      if (!(await ask(`Restore ${n} to Inbox?`))) return;
+      return moveMessages(account, folder, uids, "restore_message", "INBOX", { inProgress: `Restoring ${n}...`, done: `Restored ${n}` });
+    case "delete":
+      if (!(await ask(`Delete ${n}?`))) return;
+      return moveMessages(account, folder, uids, "delete_message", "TRASH", { inProgress: `Deleting ${n}...`, done: `Deleted ${n}` });
+    case "delete-forever":
+      if (!(await ask(`Permanently delete ${n}? This cannot be undone.`))) return;
+      return moveMessages(account, folder, uids, "permanently_delete_message", null, { inProgress: `Deleting ${n}...`, done: `Deleted ${n}` });
+  }
+}
+
+// Optimistic, like moveMessages: rows flip at once and the server catches up;
+// on failure the folder is reloaded to show the real flags.
+async function setReadState(account, folder, uids, unread) {
+  const wanted = new Set(uids);
+  const messages = folderCache[account]?.[folder] ?? [];
+  messages.forEach((m) => {
+    if (wanted.has(m.uid)) m.unread = unread;
+  });
+  persistFolderCache(account, folder);
+  // Marking unread must not look like new mail to the next poll.
+  if (unread && folder === "INBOX") uids.forEach((uid) => knownUnreadUids[account]?.add(uid));
+  renderAccountSwitcher();
+  if (isViewing(account, folder)) {
+    messageList.querySelectorAll(".message-item").forEach((el) => {
+      if (wanted.has(Number(el.dataset.uid))) el.classList.toggle("unread", unread);
+    });
+  }
+  try {
+    await invoke(unread ? "mark_unread" : "mark_read", { account, folder, uids });
+  } catch (err) {
+    showToast(`Failed: ${err}`, { autoHideMs: 4000 });
+    if (isViewing(account, folder)) loadFolder(account, folder, { force: true });
   }
 }
 
@@ -617,18 +785,24 @@ async function confirmAndMove(question, command, destFolder, statusLabels) {
   }
 }
 
-// Optimistic: drops the message from the UI and shows an in-progress toast
+function moveCurrentMessage(command, destFolder, statusLabels) {
+  if (!currentMessage) return;
+  const { account, folder, uid } = currentMessage;
+  moveMessages(account, folder, [uid], command, destFolder, statusLabels);
+}
+
+// Optimistic: drops the messages from the UI and shows an in-progress toast
 // immediately, then runs the IMAP command in the background instead of
 // blocking on it. On failure, the folder is force-refreshed to reconcile the
 // view with what the server actually did.
-function moveCurrentMessage(command, destFolder, { inProgress = "Working...", done = "Done" } = {}) {
-  if (!currentMessage) return;
-  const { account, folder, uid } = currentMessage;
-  clearDetail();
+function moveMessages(account, folder, uids, command, destFolder, { inProgress = "Working...", done = "Done" } = {}) {
+  const moving = new Set(uids);
+  if (currentMessage?.account === account && currentMessage.folder === folder && moving.has(currentMessage.uid)) clearDetail();
+  if (isViewing(account, folder)) uids.forEach((uid) => selectedUids.delete(uid));
 
   const cache = folderCache[account];
   if (cache?.[folder]) {
-    cache[folder] = cache[folder].filter((m) => m.uid !== uid);
+    cache[folder] = cache[folder].filter((m) => !moving.has(m.uid));
     persistFolderCache(account, folder);
     if (isViewing(account, folder)) renderMessageList();
     else renderAccountSwitcher();
@@ -639,7 +813,7 @@ function moveCurrentMessage(command, destFolder, { inProgress = "Working...", do
   }
 
   showToast(inProgress);
-  invoke(command, { account, folder, uid })
+  invoke(command, { account, folder, uids })
     .then(() => showToast(done, { autoHideMs: 2000 }))
     .catch((err) => {
       showToast(`Failed: ${err}`, { autoHideMs: 4000 });
@@ -864,7 +1038,7 @@ async function markMessageRead(account, folder, uid) {
   renderAccountSwitcher();
   if (isViewing(account, folder)) messageList.querySelector(`.message-item[data-uid="${uid}"]`)?.classList.remove("unread");
   try {
-    await invoke("mark_read", { account, folder, uid });
+    await invoke("mark_read", { account, folder, uids: [uid] });
   } catch (err) {
     console.error(err);
   }
@@ -1014,7 +1188,7 @@ function submitCompose(shouldSend) {
       // A fresh draft/sent message was just appended above — remove the one
       // this replaced instead of leaving a stale duplicate sitting in Drafts.
       if (supersededDraft) {
-        invoke("permanently_delete_message", { account: supersededDraft.account, folder: "DRAFTS", uid: supersededDraft.uid })
+        invoke("permanently_delete_message", { account: supersededDraft.account, folder: "DRAFTS", uids: [supersededDraft.uid] })
           .then(() => invalidateFolder(supersededDraft.account, "DRAFTS"))
           .catch((err) => console.error(err));
       }
@@ -1047,7 +1221,7 @@ document.addEventListener("keydown", (e) => {
       searchQuery = "";
       searchInput.blur();
       renderMessageList();
-    }
+    } else if (selectedUids.size && composeModal.classList.contains("hidden")) clearSelection();
     return;
   }
   if (mod && e.key === "Enter" && !composeModal.classList.contains("hidden")) {
@@ -1061,6 +1235,11 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     searchInput.focus();
     searchInput.select();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === "a" && !isTypingTarget(e.target)) {
+    e.preventDefault();
+    selectAllShown();
     return;
   }
   if (mod && /^[1-9]$/.test(e.key)) {
@@ -1078,8 +1257,13 @@ document.addEventListener("keydown", (e) => {
   else if (key === "j" || key === "ArrowDown") moveSelection(1);
   else if (key === "k" || key === "ArrowUp") moveSelection(-1);
   else if (key === "/") searchInput.focus();
-  else {
-    const btn = messageDetail.querySelector(`.detail-actions [data-key="${CSS.escape(key)}"]`);
+  else if (key === "x") {
+    const active = messageList.querySelector(".message-item.active");
+    if (active) toggleSelected(Number(active.dataset.uid));
+  } else {
+    // With rows selected, E / # act on the selection rather than the open message.
+    const scope = selectedUids.size ? messageList.querySelector(".bulk-bar") : messageDetail.querySelector(".detail-actions");
+    const btn = scope?.querySelector(`[data-key="${CSS.escape(key)}"]`);
     if (!btn) return;
     btn.click();
   }

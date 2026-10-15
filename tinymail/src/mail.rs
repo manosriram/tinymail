@@ -416,17 +416,31 @@ pub fn get_message(cache: &SessionCache, account: &Account, password: &str, fold
     parse_message_detail(&raw)
 }
 
-pub fn mark_read(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+/// IMAP UID set ("3,7,12") for commands that act on several messages at once.
+fn uid_set(uids: &[u32]) -> String {
+    uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+fn store_flags(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32], flags: &str) -> Result<(), String> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     let mailbox_name = resolve_folder(account, folder);
     with_connected(&cache.fg, account, password, &mailbox_name, |session| {
-        session
-            .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
-            .map_err(|e| e.to_string())?;
+        session.uid_store(uid_set(uids), flags).map_err(|e| e.to_string())?;
         Ok(())
     })
 }
 
-/// Moves a message to `dest_mailbox` via COPY + STORE \Deleted + EXPUNGE
+pub fn mark_read(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    store_flags(cache, account, password, folder, uids, "+FLAGS (\\Seen)")
+}
+
+pub fn mark_unread(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    store_flags(cache, account, password, folder, uids, "-FLAGS (\\Seen)")
+}
+
+/// Moves messages to `dest_mailbox` via COPY + STORE \Deleted + EXPUNGE
 /// rather than the IMAP MOVE extension (RFC 6851), since not every server
 /// (especially smaller/custom ones) implements it.
 fn move_message(
@@ -434,43 +448,49 @@ fn move_message(
     account: &Account,
     password: &str,
     folder: &str,
-    uid: u32,
+    uids: &[u32],
     dest_mailbox: &str,
 ) -> Result<(), String> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     let mailbox_name = resolve_folder(account, folder);
     with_connected(&cache.fg, account, password, &mailbox_name, |session| {
-        session.uid_copy(uid.to_string(), dest_mailbox).map_err(|e| e.to_string())?;
+        session.uid_copy(uid_set(uids), dest_mailbox).map_err(|e| e.to_string())?;
         session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .uid_store(uid_set(uids), "+FLAGS (\\Deleted)")
             .map_err(|e| e.to_string())?;
         session.expunge().map_err(|e| e.to_string())?;
         Ok(())
     })
 }
 
-pub fn delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
-    move_message(cache, account, password, folder, uid, &account.trash_folder)
+pub fn delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    move_message(cache, account, password, folder, uids, &account.trash_folder)
 }
 
-pub fn archive_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
-    move_message(cache, account, password, folder, uid, &account.archive_folder)
+pub fn archive_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    move_message(cache, account, password, folder, uids, &account.archive_folder)
 }
 
-pub fn unarchive_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
-    move_message(cache, account, password, folder, uid, "INBOX")
+pub fn unarchive_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    move_message(cache, account, password, folder, uids, "INBOX")
 }
 
-pub fn restore_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
-    move_message(cache, account, password, folder, uid, "INBOX")
+pub fn restore_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    move_message(cache, account, password, folder, uids, "INBOX")
 }
 
-/// Permanently removes a message: STORE \Deleted + EXPUNGE, no copy anywhere
+/// Permanently removes messages: STORE \Deleted + EXPUNGE, no copy anywhere
 /// first. Unlike `move_message`, this is not recoverable.
-pub fn permanently_delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uid: u32) -> Result<(), String> {
+pub fn permanently_delete_message(cache: &SessionCache, account: &Account, password: &str, folder: &str, uids: &[u32]) -> Result<(), String> {
+    if uids.is_empty() {
+        return Ok(());
+    }
     let mailbox_name = resolve_folder(account, folder);
     with_connected(&cache.fg, account, password, &mailbox_name, |session| {
         session
-            .uid_store(uid.to_string(), "+FLAGS (\\Deleted)")
+            .uid_store(uid_set(uids), "+FLAGS (\\Deleted)")
             .map_err(|e| e.to_string())?;
         session.expunge().map_err(|e| e.to_string())?;
         Ok(())
@@ -685,6 +705,12 @@ mod tests {
     fn resolve_folder_passes_through_unknown_names() {
         let account = test_account();
         assert_eq!(resolve_folder(&account, "SomeCustomFolder"), "SomeCustomFolder");
+    }
+
+    #[test]
+    fn uid_set_joins_uids_with_commas() {
+        assert_eq!(uid_set(&[42]), "42");
+        assert_eq!(uid_set(&[3, 7, 12]), "3,7,12");
     }
 
     #[test]

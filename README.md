@@ -23,6 +23,8 @@ The older single-account format (the same keys at the top level, without `accoun
 
 Keyboard shortcuts: `C` compose, `J`/`K` or arrows move through messages, `R` reply, `F` forward, `E` archive/restore, `#` trash, `⌘K` or `/` search, `⌘↵` send.
 
+To act on several messages at once, tick the checkbox that appears when you hover a message (or ⌘/Ctrl-click it, Shift-click to select a range, `X` to toggle the open one, `⌘A` to select all). The bar at the top of the list then archives/restores (`E`), trashes or permanently deletes (`#`), or marks the selection read/unread in one go; `Esc` clears the selection.
+
 <img width="800" alt="tinymail inbox" src="assets/inbox.png" />
 
 <img width="800" alt="tinymail message view" src="assets/message-view.png" />

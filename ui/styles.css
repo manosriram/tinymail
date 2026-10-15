@@ -235,13 +235,29 @@ kbd {
 /* Message list */
 .message-list { overflow-y: auto; border-right: 1px solid var(--border); }
 .message-item {
-  display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 0.7rem;
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 0.6rem;
   padding: 0.8rem 1.1rem 0.8rem 0.9rem; cursor: pointer;
   border-bottom: 1px solid var(--border); border-left: 3px solid transparent;
+  -webkit-user-select: none; user-select: none; /* Shift-click selects rows, not text */
 }
 .message-item:hover { background: var(--bg-hover); }
 .message-item.active { background: var(--bg-selected); border-left-color: var(--accent); }
-.unread-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: transparent; }
+.message-item.selected, .message-item.selected:hover { background: var(--bg-selected); }
+/* The leading column shows the unread dot, swapped for a checkbox on hover
+   or whenever any row is selected. */
+.message-item .mark { display: flex; justify-content: center; padding-top: 2px; }
+.unread-dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: transparent; }
+.message-item .select-box { display: none; }
+.message-item:hover .unread-dot, .message-list.selecting .unread-dot { display: none; }
+.message-item:hover .select-box, .message-list.selecting .select-box { display: inline-grid; }
+.select-box {
+  display: inline-grid; place-items: center; width: 16px; height: 16px; flex-shrink: 0; cursor: pointer;
+  border: 1.5px solid var(--text-faint); border-radius: 4px; background: var(--bg); color: transparent;
+}
+.select-box .icon { width: 12px; height: 12px; stroke-width: 3; }
+.select-box:hover { border-color: var(--accent); }
+.message-item.selected .select-box, .select-box.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.select-box.partial { border-color: var(--accent); }
 .message-item.unread .unread-dot { background: var(--accent); }
 .message-row { display: flex; align-items: baseline; justify-content: space-between; gap: 0.75rem; }
 .message-item .from { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -253,6 +269,10 @@ kbd {
 
 .list-banner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 1rem; font-size: 13px; color: var(--text-muted); border-bottom: 1px solid var(--border); background: var(--bg-subtle); position: sticky; top: 0; z-index: 1; }
 .list-banner .btn { height: 28px; font-size: 0.8rem; }
+.bulk-bar { padding: 0.35rem 0.6rem 0.35rem 1.1rem; background: var(--bg-raised); }
+.bulk-count { display: flex; align-items: center; gap: 0.6rem; font-weight: 500; color: var(--text); cursor: pointer; }
+.bulk-actions { display: flex; gap: 2px; }
+.bulk-actions .icon-btn.danger:hover { color: var(--danger); }
 
 /* Message detail */
 .message-detail { display: flex; flex-direction: column; min-height: 0; min-width: 0; }

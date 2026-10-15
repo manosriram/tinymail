@@ -115,61 +115,71 @@ async fn prefetch_messages(account: String, folder: String, uids: Vec<u32>, stat
 }
 
 #[tauri::command]
-async fn mark_read(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn mark_read(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
         let (cache, acct, pw) = state.resolve(&account)?;
-        mail::mark_read(&cache, &acct, &pw, &folder, uid)
+        mail::mark_read(&cache, &acct, &pw, &folder, &uids)
     })
     .await
 }
 
 #[tauri::command]
-async fn delete_message(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn mark_unread(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
         let (cache, acct, pw) = state.resolve(&account)?;
-        mail::delete_message(&cache, &acct, &pw, &folder, uid)
+        mail::mark_unread(&cache, &acct, &pw, &folder, &uids)
     })
     .await
 }
 
 #[tauri::command]
-async fn archive_message(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn delete_message(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
         let (cache, acct, pw) = state.resolve(&account)?;
-        mail::archive_message(&cache, &acct, &pw, &folder, uid)
+        mail::delete_message(&cache, &acct, &pw, &folder, &uids)
     })
     .await
 }
 
 #[tauri::command]
-async fn unarchive_message(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn archive_message(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
         let (cache, acct, pw) = state.resolve(&account)?;
-        mail::unarchive_message(&cache, &acct, &pw, &folder, uid)
+        mail::archive_message(&cache, &acct, &pw, &folder, &uids)
     })
     .await
 }
 
 #[tauri::command]
-async fn restore_message(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn unarchive_message(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
         let (cache, acct, pw) = state.resolve(&account)?;
-        mail::restore_message(&cache, &acct, &pw, &folder, uid)
+        mail::unarchive_message(&cache, &acct, &pw, &folder, &uids)
     })
     .await
 }
 
 #[tauri::command]
-async fn permanently_delete_message(account: String, folder: String, uid: u32, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+async fn restore_message(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let state = state.inner().clone();
     blocking(move || {
         let (cache, acct, pw) = state.resolve(&account)?;
-        mail::permanently_delete_message(&cache, &acct, &pw, &folder, uid)
+        mail::restore_message(&cache, &acct, &pw, &folder, &uids)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn permanently_delete_message(account: String, folder: String, uids: Vec<u32>, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let state = state.inner().clone();
+    blocking(move || {
+        let (cache, acct, pw) = state.resolve(&account)?;
+        mail::permanently_delete_message(&cache, &acct, &pw, &folder, &uids)
     })
     .await
 }
@@ -283,6 +293,7 @@ pub fn run() {
             get_message,
             prefetch_messages,
             mark_read,
+            mark_unread,
             delete_message,
             archive_message,
             unarchive_message,

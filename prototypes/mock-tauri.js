@@ -57,6 +57,13 @@
     <p><a href="https://figma.com/billing">View billing settings</a></p></div>`;
 
   const find = (account, folder, uid) => (account === accounts[1].username ? gmailInbox : mailbox[folder] ?? []).find((m) => m.uid === uid);
+  const move = (account, folder, uids, dest) => {
+    if (account === accounts[1].username) return;
+    const src = mailbox[folder];
+    const moving = src.filter((m) => uids.includes(m.uid));
+    mailbox[folder] = src.filter((m) => !uids.includes(m.uid));
+    if (dest) mailbox[dest].push(...moving);
+  };
   const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const handlers = {
@@ -68,8 +75,14 @@
       return { from: m.from, to: m.to ?? account, cc: m.cc ?? "", subject: m.subject, date: new Date(m.date).toISOString(), body: m.body, body_html: m.html ? receiptHtml : undefined, attachments: m.attachments ?? [] };
     },
     open_link: ({ url }) => { (window.__opened ??= []).push(url); },
-    empty_trash: ({ account }) => { mailbox.TRASH.length = 0; },
-    mark_read: ({ account, folder, uid }) => { const m = find(account, folder, uid); if (m) m.unread = false; },
+    empty_trash: ({ account }) => { mailbox.TRASH = []; },
+    mark_read: ({ account, folder, uids }) => uids.forEach((uid) => { const m = find(account, folder, uid); if (m) m.unread = false; }),
+    mark_unread: ({ account, folder, uids }) => uids.forEach((uid) => { const m = find(account, folder, uid); if (m) m.unread = true; }),
+    archive_message: ({ account, folder, uids }) => move(account, folder, uids, "ARCHIVE"),
+    unarchive_message: ({ account, folder, uids }) => move(account, folder, uids, "INBOX"),
+    restore_message: ({ account, folder, uids }) => move(account, folder, uids, "INBOX"),
+    delete_message: ({ account, folder, uids }) => move(account, folder, uids, "TRASH"),
+    permanently_delete_message: ({ account, folder, uids }) => move(account, folder, uids, null),
   };
 
   window.__TAURI__ = {
